@@ -1,4 +1,4 @@
-# codex-deepseek-flash-prewalk
+# prewalk skill
 
 Two [Codex skills](https://developers.openai.com/codex/skills/) that run an orchestrated coding handoff:
 
