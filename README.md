@@ -1,10 +1,10 @@
 # prewalk skill
 
-Two [Codex skills](https://developers.openai.com/codex/skills/) that run an orchestrated coding handoff:
+**prewalk-skill** provides two [Codex skills](https://developers.openai.com/codex/skills/) that run an orchestrated coding handoff:
 
-**SOL (your main Codex model) → prewalk + first credible edit → DeepSeek-V4.1-Flash (`deepseek-flash`, max reasoning) executes → SOL reviews the actual diff.**
+**SOL (your main Codex model) → model/effort preflight → prewalk + first credible edit → DeepSeek-V4.1-Flash (`deepseek-flash`, max reasoning) executes → SOL reviews the actual diff.**
 
-- `prewalk/` — the orchestration skill: SOL investigation, confidence gate, one atomic edit, dispatch, and final review.
+- `prewalk/` — the orchestration skill: model/effort preflight, SOL investigation, confidence gate, one atomic edit, judgment-density delegation, dispatch, bounded escalation, and final review.
 - `codex-deepseek-subagent/` — the management skill that owns the DeepSeek executor surface: provider config, merged model catalog, credential storage, desktop runtime staging, and acceptance tests.
 
 ## Why not `spawn_agent(agent_type="DeepSeek")`
