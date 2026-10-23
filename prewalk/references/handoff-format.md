@@ -30,6 +30,18 @@ SOL EVIDENCE
 - Compatibility constraints and risks: [list]
 - Visual facts supplied by SOL: [text description, paths, dimensions, or not applicable]
 
+DELEGATION BOUNDARY
+- Decisions SOL retained: [plan, requirement/ambiguity interpretation, architecture, correctness-critical choices, final review — name the specifics for this task]
+- Executor scope: [mechanical implementation, builds and tests, debugging; include hard-but-mechanical work]
+- Escalate only if: [expected ambiguity or direction points, or "none identified"]
+
+MODEL AND EFFORT SELECTION
+- Requested SOL model / effort: [values the user asked for, or the defaults]
+- Verified effective SOL model / effort: [parent session actually in use, with how it was verified]
+- Requested executor model / effort: [values the user asked for, or the managed defaults]
+- Validated executor launch model / effort: [values in the actual launch command after validation]
+- Validation evidence: [commands and observed status/config output; never credentials]
+
 FIRST CREDIBLE EDIT ALREADY LANDED
 - Changed paths: [paths]
 - Pattern established: [what the edit demonstrates]
@@ -48,13 +60,17 @@ EXECUTION INSTRUCTIONS
 3. If repository evidence contradicts this handoff, update the approach and record why.
 4. Inspect the final complete diff and preserve unrelated worktree changes.
 5. Do not stop at the first failed validation; diagnose it unless genuinely blocked.
-6. Do not perform final approval or SOL review.
+6. Treat ordinary implementation, compile, and test failures as your own work; they are not escalation.
+7. Escalate only for a genuinely unresolved requirement ambiguity or a new lead-level direction decision. Preserve existing work and return the standard SOL_REVIEW package with state `escalated`, the evidence, the options considered, the smallest safe default, and the exact decision required instead of guessing.
+8. Do not perform final approval or SOL review.
 
 MANDATORY RETURN TO SOL
 When finished or blocked, your final response must contain a concise status followed by one fenced, copy-ready package beginning exactly with `PREWALK_PHASE: SOL_REVIEW`. It must contain:
 - The unchanged `HANDOFF_ID` from this package
 - Original objective and acceptance criteria
-- Completion or blocked status
+- Completion or blocked status (`escalated` when a decision is required)
+- The decisions SOL retained and any decision required from SOL
+- The model/effort selection carried forward from this package (requested and validated values) and any deviation; do not assert a model identity beyond those values
 - Inherited SOL first edit and every final changed path
 - Important implementation decisions and deviations from the handed-off trajectory
 - Exact test/build/lint commands and outcomes
@@ -79,14 +95,17 @@ ORIGINAL OBJECTIVE
 [User-visible outcome and acceptance criteria]
 
 EXECUTION STATUS
-- State: [complete | partially complete | blocked]
+- State: [complete | partially complete | blocked | escalated — `escalated` means a decision belongs to SOL]
 - Repository root: [root]
 - Review baseline/diff range: [starting commit, branch, or precise comparison]
 - Inherited unrelated worktree changes: [list]
+- Model/effort selection carried forward: [requested and effective SOL values; requested and validated executor launch values; any deviation]
+- Decision required from SOL: [none, or the exact decision, the evidence that forced it, the options considered, and the smallest safe default]
 
 CHANGE TRAJECTORY
 - SOL first edit: [paths and summary]
 - Final changed paths: [complete inventory]
+- Decisions SOL retained: [list from the handoff; note any the executor crossed]
 - Implementation decisions: [key decisions and rationale]
 - Deviations from SOL handoff: [what changed and why]
 - Remaining TODO or blocker: [none or exact items]
@@ -104,7 +123,8 @@ REVIEW INSTRUCTIONS
 1. Inspect repository instructions, worktree status, and the actual diff against the stated baseline.
 2. Verify requirement coverage and that the implementation addresses the evidenced cause.
 3. Check correctness, error paths, compatibility, security, unintended changes, and test adequacy.
-4. Run targeted read-only checks or tests where useful.
-5. Report findings by severity with precise file and line references. If there are no findings, state that clearly and list residual risks or tests not performed.
-6. Do not edit code unless the user explicitly requests remediation.
+4. Verify the carried-forward model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as proof of its model.
+5. Run targeted read-only checks or tests where useful.
+6. Report findings by severity with precise file and line references. If there are no findings, state that clearly and list residual risks or tests not performed.
+7. Do not edit code unless the user explicitly requests remediation.
 ```
