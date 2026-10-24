@@ -37,7 +37,8 @@ Copy both skill directories into your Codex skills location:
 
 1. In Codex, ask: `配置 DeepSeek 执行器` — the management skill runs `setup`, asks for your API key via stdin, writes the `[model_providers.deepseek]` block, the merged model catalog, and stages the desktop runtime.
 2. It then runs acceptance: a direct DeepSeek call plus the executor-surface pass phrase (`NATIVE_DEEPSEEK_OK`). Status `ready` means the executor boundary works.
-3. After changing the parent model, run `repair` to re-apply and re-verify.
+3. For an OpenAI-compatible gateway instead of `https://api.deepseek.com`, run `setup`/`repair` with `--base-url <url>`. Only http/https is accepted, credentials/query/fragment are rejected, and plain http is allowed only for loopback hosts. Without `--base-url`, an existing valid address is preserved; an incompatible hand-written provider still returns `conflict` rather than being overwritten.
+4. After changing the parent model, run `repair` to re-apply and re-verify.
 
 ## Usage
 
@@ -49,14 +50,25 @@ Ask in plain language, e.g.:
 
 Navigator runs the prewalk and lands one edit, dispatches the handoff package to the Builder executor process, waits, then reviews the real worktree diff before reporting.
 
+### First use
+
+Prewalk asks the connection questions only when the managed executor is missing, incomplete, or the user wants to change the endpoint: destination base URL (default `https://api.deepseek.com`), API key through the host's secure prompt or stdin, and any protocol/model metadata the host needs for a custom connection. A ready configuration is reused without asking again, and answers are grouped so the user is not interrupted once per run. Configuring a connection does not prove that every requested model or effort works on that surface — model/effort preflight and its validation still apply.
+
+### Live progress
+
+Every dispatch gets one run directory outside the repository containing the handoff, `progress.jsonl`, stdout, and stderr. Builder appends one JSON event at start, on each TODO transition, before and after long commands, and on completion or escalation; the sharing format is in [prewalk/references/progress-format.md](prewalk/references/progress-format.md). Navigator reports the run directory and background task ID, reads only the new tail at natural checkpoints, and does not busy-poll.
+
+This is a snapshot protocol: progress is self-reported status and raw output remains the tool-level detail. A missing or stale file is not proof of a hung child. The host's background-task panel shows process state, but there is no native live subagent panel in the parent chat; when the parent turn ends, updates pause until the next user message or completion notification. Final proof is still Navigator's inspection of the actual diff.
+
 ## Notes
 
 - Do **not** pick `deepseek-flash` in the desktop model picker: the app persists that choice into the top-level `model` in `config.toml`, which breaks the non-DeepSeek parent contract this setup relies on.
 - The API key lives in the OS credential vault (Windows Credential Manager / macOS Keychain) under the target `codex-deepseek-api-key`; no secret is ever written to the repository, config, or logs.
+- `--base-url` changes only the provider block this skill manages. Status accepts any structurally valid configured address, not only `api.deepseek.com`.
 
 ## Repo layout
 
 ```text
-prewalk/                  # orchestration skill (SKILL.md + handoff format)
+prewalk/                  # orchestration skill (SKILL.md + handoff/progress formats)
 codex-deepseek-subagent/  # executor management skill (script + docs + tests)
 ```

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import time
 import tomllib
+import urllib.parse
 import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -39,6 +40,8 @@ LEGACY_MODEL_PREFIX = "deepseek-v4-flash"
 PROVIDER = "deepseek"
 ROLE = "DeepSeek"
 EFFORT = "max"
+DEFAULT_BASE_URL = "https://api.deepseek.com/"
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 PARENT_MULTI_AGENT_VERSION = "v1"
 DESKTOP_MULTI_AGENT_V2 = False
 MAX_STATE_DATABASES = 32
@@ -478,6 +481,64 @@ def toml_string_array(values: list[str]) -> str:
     return "[" + ", ".join(toml_string(value) for value in values) + "]"
 
 
+def canonical_base_url(raw: str) -> str:
+    """校验 OpenAI 兼容 Base URL，返回统一保留末尾斜杠的规范形式。"""
+    value = raw.strip()
+    if not value:
+        raise ManagerError("invalid_base_url", "Base URL 不能为空。")
+    if any(character.isspace() for character in value):
+        raise ManagerError("invalid_base_url", "Base URL 不能包含空白字符。")
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value) or "\\" in value:
+        raise ManagerError("invalid_base_url", "Base URL 包含非法字符。")
+    try:
+        parts = urllib.parse.urlsplit(value)
+        port = parts.port
+    except ValueError as exc:
+        raise ManagerError("invalid_base_url", f"Base URL 无法解析：{value}") from exc
+    scheme = parts.scheme.lower()
+    if scheme not in {"http", "https"}:
+        raise ManagerError("invalid_base_url", "Base URL 必须使用 http 或 https。")
+    if parts.username or parts.password:
+        raise ManagerError("invalid_base_url", "Base URL 不能在地址中携带用户名或密码。")
+    if parts.query or parts.fragment:
+        raise ManagerError("invalid_base_url", "Base URL 不能包含查询串或片段。")
+    host = parts.hostname
+    if not host:
+        raise ManagerError("invalid_base_url", "Base URL 缺少主机名。")
+    if scheme == "http" and host not in LOOPBACK_HOSTS:
+        raise ManagerError(
+            "invalid_base_url",
+            "只有本机回环地址可以使用 http；其他地址必须使用 https。",
+        )
+    host_part = f"[{host}]" if ":" in host else host
+    if port is not None:
+        host_part = f"{host_part}:{port}"
+    return f"{scheme}://{host_part}{parts.path.rstrip('/')}/"
+
+
+def base_url_or_none(raw: Any) -> str | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return canonical_base_url(raw)
+    except ManagerError:
+        return None
+
+
+def same_base_url(left: Any, right: Any) -> bool:
+    left_url = base_url_or_none(left)
+    return left_url is not None and left_url == base_url_or_none(right)
+
+
+def resolve_desired_base_url(parsed: dict[str, Any], explicit: str | None) -> str:
+    """显式 URL 优先；否则保留既有合法 URL；都没有时使用默认地址。"""
+    if explicit is not None:
+        return canonical_base_url(explicit)
+    provider = (parsed.get("model_providers") or {}).get(PROVIDER)
+    existing = provider.get("base_url") if isinstance(provider, dict) else None
+    return base_url_or_none(existing) or DEFAULT_BASE_URL
+
+
 def parse_toml_text(text: str) -> dict[str, Any]:
     try:
         return tomllib.loads(text)
@@ -615,13 +676,13 @@ Do not spawn additional subagents unless the user or parent explicitly asks for 
 '''
 
 
-def managed_provider_block() -> str:
+def managed_provider_block(base_url: str) -> str:
     auth = expected_provider_auth()
     return f'''
 {PROVIDER_BEGIN}
 [model_providers.{PROVIDER}]
 name = "DeepSeek"
-base_url = "https://api.deepseek.com/"
+base_url = {toml_string(base_url)}
 wire_api = "responses"
 
 [model_providers.{PROVIDER}.auth]
@@ -656,18 +717,25 @@ def expected_provider_auth() -> dict[str, Any]:
     }
 
 
-def provider_conflicts(provider: dict[str, Any] | None) -> list[str]:
+def provider_conflicts(
+    provider: dict[str, Any] | None,
+    expected_base_url: str | None = None,
+) -> list[str]:
     if not provider:
         return []
     issues: list[str] = []
     expected = {
         "name": "DeepSeek",
-        "base_url": "https://api.deepseek.com/",
         "wire_api": "responses",
     }
     for key, value in expected.items():
         if provider.get(key) != value:
             issues.append(f"model_providers.deepseek.{key}")
+    if expected_base_url is None:
+        if base_url_or_none(provider.get("base_url")) is None:
+            issues.append("model_providers.deepseek.base_url")
+    elif not same_base_url(provider.get("base_url"), expected_base_url):
+        issues.append("model_providers.deepseek.base_url")
     auth = provider.get("auth")
     if not isinstance(auth, dict):
         issues.append("model_providers.deepseek.auth")
@@ -678,10 +746,14 @@ def provider_conflicts(provider: dict[str, Any] | None) -> list[str]:
     return issues
 
 
-def compatible_existing(parsed: dict[str, Any], paths: Paths) -> tuple[bool, list[str]]:
+def compatible_existing(
+    parsed: dict[str, Any],
+    paths: Paths,
+    expected_base_url: str,
+) -> tuple[bool, list[str]]:
     issues: list[str] = []
     provider = (parsed.get("model_providers") or {}).get(PROVIDER)
-    issues.extend(provider_conflicts(provider))
+    issues.extend(provider_conflicts(provider, expected_base_url))
     agent = (parsed.get("agents") or {}).get(ROLE)
     if agent:
         if set(agent) - {"description", "config_file"}:
@@ -801,16 +873,17 @@ def read_manifest(paths: Paths) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
-def install(paths: Paths, codex_bin: str) -> dict[str, Any]:
+def install(paths: Paths, codex_bin: str, base_url: str | None = None) -> dict[str, Any]:
     paths.home.mkdir(parents=True, exist_ok=True)
     config_text = paths.config.read_text() if paths.config.is_file() else ""
     parsed = parse_toml_text(config_text) if config_text.strip() else {}
+    desired_base_url = resolve_desired_base_url(parsed, base_url)
     previous_manifest = read_manifest(paths)
     provider_marker_present = PROVIDER_BEGIN in config_text and PROVIDER_END in config_text
     role_marker_present = ROLE_BEGIN in config_text and ROLE_END in config_text
     unmanaged_config = remove_managed_blocks(config_text)
     unmanaged_parsed = parse_toml_text(unmanaged_config) if unmanaged_config.strip() else {}
-    compatible, conflicts = compatible_existing(unmanaged_parsed, paths)
+    compatible, conflicts = compatible_existing(unmanaged_parsed, paths, desired_base_url)
     if not compatible:
         raise ManagerError("conflict", "发现不兼容的现有 DeepSeek 配置。", {"fields": conflicts})
     previous_agent_managed = bool(previous_manifest.get("managed_agent_file"))
@@ -896,7 +969,7 @@ def install(paths: Paths, codex_bin: str) -> dict[str, Any]:
         new_config = unmanaged_config
         provider_exists = bool((unmanaged_parsed.get("model_providers") or {}).get(PROVIDER))
         if not provider_exists:
-            new_config = new_config.rstrip() + "\n" + managed_provider_block()
+            new_config = new_config.rstrip() + "\n" + managed_provider_block(desired_base_url)
         new_config = set_top_level_key(new_config, "model_catalog_json", str(paths.catalog))
         new_config = set_table_bool(
             new_config,
@@ -938,12 +1011,17 @@ def install(paths: Paths, codex_bin: str) -> dict[str, Any]:
             "managed_multi_agent_v2": managed_multi_agent_v2,
             "previous_multi_agent_v2": previous_multi_agent_v2,
             "desktop_multi_agent_v2": DESKTOP_MULTI_AGENT_V2,
+            "base_url": desired_base_url,
             "config_sha256": sha256_bytes(new_config.encode()),
             "catalog_sha256": sha256_bytes(catalog_bytes),
             "agent_sha256": sha256_bytes(expected_agent_text().encode()),
         }
         write_manifest(paths, manifest)
-        return {"backup": str(backup), "adopted_existing": adopted_existing}
+        return {
+            "backup": str(backup),
+            "adopted_existing": adopted_existing,
+            "base_url": desired_base_url,
+        }
     except Exception:
         restore_backup(paths, backup)
         raise
@@ -969,7 +1047,10 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
             errors.append(str(exc))
     provider = (parsed.get("model_providers") or {}).get(PROVIDER)
     role = (parsed.get("agents") or {}).get(ROLE)
+    provider_base_url = provider.get("base_url") if isinstance(provider, dict) else None
     checks["provider_registered"] = bool(provider)
+    checks["provider_base_url"] = provider_base_url
+    checks["provider_base_url_valid"] = base_url_or_none(provider_base_url) is not None
     checks["provider_valid"] = bool(provider) and not provider_conflicts(provider)
     checks["agent_discovery"] = "standalone"
     checks["legacy_role_registration_present"] = bool(role)
@@ -1267,7 +1348,13 @@ def restore_backup(paths: Paths, backup: Path) -> None:
             target.unlink()
 
 
-def setup(paths: Paths, codex_bin: str, api_key_stdin: bool, skip_live_test: bool) -> dict[str, Any]:
+def setup(
+    paths: Paths,
+    codex_bin: str,
+    api_key_stdin: bool,
+    skip_live_test: bool,
+    base_url: str | None = None,
+) -> dict[str, Any]:
     if not credential_available():
         raise ManagerError("unsupported", "当前只支持 macOS 和 Windows 系统凭据库。")
     credential_created = False
@@ -1283,7 +1370,7 @@ def setup(paths: Paths, codex_bin: str, api_key_stdin: bool, skip_live_test: boo
 
     install_result: dict[str, Any] | None = None
     try:
-        install_result = install(paths, codex_bin)
+        install_result = install(paths, codex_bin, base_url)
         if skip_live_test:
             return result(
                 "configured",
@@ -1459,6 +1546,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=("status", "setup", "test", "repair", "disable", "uninstall"))
     parser.add_argument("--codex-home")
+    parser.add_argument("--base-url", help="OpenAI 兼容 Base URL；省略时保留既有合法值或使用默认地址。")
     parser.add_argument("--api-key-stdin", action="store_true")
     parser.add_argument("--skip-live-test", action="store_true")
     parser.add_argument("--remove-credential", action="store_true")
@@ -1466,6 +1554,9 @@ def main() -> int:
     args = parser.parse_args()
     paths = resolve_paths(args.codex_home)
     try:
+        explicit_base_url = (
+            canonical_base_url(args.base_url) if args.base_url is not None else None
+        )
         if args.command == "status":
             try:
                 codex_bin = find_desktop_codex(paths, allow_stage=False)
@@ -1479,7 +1570,13 @@ def main() -> int:
             with operation_lock(paths):
                 if args.command in {"setup", "repair"}:
                     codex_bin = find_desktop_codex(paths, allow_stage=True)
-                    payload = setup(paths, codex_bin, args.api_key_stdin, args.skip_live_test)
+                    payload = setup(
+                        paths,
+                        codex_bin,
+                        args.api_key_stdin,
+                        args.skip_live_test,
+                        explicit_base_url,
+                    )
                 elif args.command == "test":
                     codex_bin = find_desktop_codex(paths, allow_stage=True)
                     payload = run_tests(paths, codex_bin)

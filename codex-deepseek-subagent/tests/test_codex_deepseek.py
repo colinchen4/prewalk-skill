@@ -145,6 +145,120 @@ class DeepSeekManagerTests(unittest.TestCase):
             "NATIVE_DEEPSEEK_OK",
         )
 
+    def test_base_url_default_and_custom_forms_are_canonical(self):
+        self.assertEqual(
+            MANAGER.canonical_base_url("https://api.deepseek.com"),
+            "https://api.deepseek.com/",
+        )
+        self.assertEqual(
+            MANAGER.canonical_base_url(" https://gateway.example.com/v1 "),
+            "https://gateway.example.com/v1/",
+        )
+        self.assertEqual(
+            MANAGER.canonical_base_url("http://127.0.0.1:8080"),
+            "http://127.0.0.1:8080/",
+        )
+        self.assertEqual(
+            MANAGER.canonical_base_url("http://localhost:8080/v1"),
+            "http://localhost:8080/v1/",
+        )
+
+    def test_base_url_rejects_unsafe_or_malformed_values(self):
+        for value in (
+            "",
+            "ftp://api.deepseek.com",
+            "https://user:secret@api.deepseek.com",
+            "https://api.deepseek.com/v1?debug=1",
+            "https://api.deepseek.com/v1#fragment",
+            "http://api.deepseek.com",
+            "https:///missing-host",
+            "https://api.deepseek.com /v1",
+            "https://api.deepseek.com:bad",
+            r"https://api.deepseek.com\v1",
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(MANAGER.ManagerError):
+                    MANAGER.canonical_base_url(value)
+
+    def test_managed_provider_block_renders_custom_base_url(self):
+        block = MANAGER.managed_provider_block("https://gateway.example.com/v1/")
+        self.assertIn('base_url = "https://gateway.example.com/v1/"', block)
+
+    def test_provider_conflicts_accepts_trailing_slash_equivalent(self):
+        provider = {
+            "name": "DeepSeek",
+            "base_url": "https://api.deepseek.com/",
+            "wire_api": "responses",
+            "auth": MANAGER.expected_provider_auth(),
+        }
+        self.assertEqual(
+            MANAGER.provider_conflicts(provider, MANAGER.DEFAULT_BASE_URL),
+            [],
+        )
+        self.assertIn(
+            "model_providers.deepseek.base_url",
+            MANAGER.provider_conflicts(provider, "https://gateway.example.com"),
+        )
+
+    def test_status_base_url_check_is_structural(self):
+        self.assertIn(
+            "model_providers.deepseek.base_url",
+            MANAGER.provider_conflicts(
+                {
+                    "name": "DeepSeek",
+                    "base_url": "http://public.example.com",
+                    "wire_api": "responses",
+                    "auth": MANAGER.expected_provider_auth(),
+                }
+            ),
+        )
+
+    def test_resolve_desired_base_url_preserves_valid_existing(self):
+        parsed = {
+            "model_providers": {
+                "deepseek": {"base_url": "https://gateway.example.com/v1/"}
+            }
+        }
+        self.assertEqual(
+            MANAGER.resolve_desired_base_url(parsed, None),
+            "https://gateway.example.com/v1/",
+        )
+        self.assertEqual(
+            MANAGER.resolve_desired_base_url(parsed, "https://new.example.com"),
+            "https://new.example.com/",
+        )
+        self.assertEqual(
+            MANAGER.resolve_desired_base_url({}, None),
+            MANAGER.DEFAULT_BASE_URL,
+        )
+        self.assertEqual(
+            MANAGER.resolve_desired_base_url(
+                {"model_providers": {"deepseek": {"base_url": "ftp://bad"}}},
+                None,
+            ),
+            MANAGER.DEFAULT_BASE_URL,
+        )
+
+    def test_compatible_existing_accepts_legacy_trailing_slash_default(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = MANAGER.resolve_paths(temp_dir)
+            parsed = {
+                "model_providers": {
+                    "deepseek": {
+                        "name": "DeepSeek",
+                        "base_url": "https://api.deepseek.com/",
+                        "wire_api": "responses",
+                        "auth": MANAGER.expected_provider_auth(),
+                    }
+                }
+            }
+            compatible, issues = MANAGER.compatible_existing(
+                parsed,
+                paths,
+                MANAGER.DEFAULT_BASE_URL,
+            )
+        self.assertTrue(compatible, issues)
+
 
 if __name__ == "__main__":
     unittest.main()

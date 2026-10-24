@@ -17,6 +17,19 @@ Choose the mode from the incoming request:
 
 Never apply the stop-after-one-edit boundary to Builder execution. Never repeat Navigator investigation in executor mode unless retained evidence is contradicted by the repository.
 
+## First-use connection setup
+
+For an orchestrated Navigator run, check whether the managed executor is ready (the manager skill's `status`) before the model/effort preflight. Ask connection questions only when that status is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
+
+When setup is needed, group the questions in one prompt:
+
+1. Host-native authentication for Navigator, if the parent session has none.
+2. Builder provider base URL — default: the managed default `https://api.deepseek.com`.
+3. API key only through the host's secure prompt or stdin. Never echo it, and never put it in a handoff, progress file, log, or commit.
+4. Protocol or model metadata only when the host needs it to describe a custom connection.
+
+Apply changes only through the host's managed configuration path — here the `codex-deepseek-subagent` skill (`setup`/`repair`, optional `--base-url`), never by hand-editing TOML, JSON, credentials, or runtime copies. A valid existing configuration is reused without asking again. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
+
 ## Model and effort preflight
 
 For an orchestrated Navigator run, ask the user to confirm the model pairing before **Orient**. Use the host's ordinary question mechanism; structured questions are optional, and plain text is sufficient. Reuse values already supplied in the invocation and ask only for missing values. Do not ask again during executor execution, review, or resume from a phase marker.
@@ -108,15 +121,17 @@ Make exactly one coherent implementation edit. It may include inseparable adjace
 
 ### Dispatch at the Builder boundary
 
-Read [handoff-format.md](references/handoff-format.md) and populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
+Read [handoff-format.md](references/handoff-format.md) and [progress-format.md](references/progress-format.md), then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
 
-When the executor surface is ready (per the `codex-deepseek-subagent` skill status), create a short unique `HANDOFF_ID`, write the populated handoff package to a temporary file, then launch the managed executor with the exec tool using this shape (adjust quoting for the active shell; `<` redirects the package into stdin):
+Allocate one run directory outside the repository containing the handoff package, `progress.jsonl`, and the raw stdout/stderr files, and give their absolute paths in the handoff's `PROGRESS CHANNEL` section. When the executor surface is ready (per the `codex-deepseek-subagent` skill status), create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, then launch the managed executor with the exec tool using this shape (adjust quoting for the active shell; `<` redirects the package into stdin):
 
 ```sh
 CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec --skip-git-repo-check -s workspace-write -C "<task workspace>" -m deepseek-flash -c model_provider="\"deepseek\"" -c model_reasoning_effort="\"max\"" - < "<handoff-package-file>"
 ```
 
 where `<staged-codex.exe>` is the desktop runtime path reported by the `codex-deepseek-subagent` skill (run its `status`). Keep `-s workspace-write`: sandboxed execution is part of this contract and works on paths with spaces as long as the staged runtime bundle is complete (`codex.exe`, `codex-code-mode-host.exe`, `codex-windows-sandbox-setup.exe`, `codex-command-runner.exe` — the last one is required for any sandboxed command to spawn; a staged copy missing it fails every command with `CreateProcessWithLogonW failed: 2`). Do not switch to `danger-full-access` or otherwise broaden permissions on your own initiative, and do not silently downgrade the sandbox either: if you believe the invocation needs a change, ask the user once. Allow a long timeout or run it as a background task for substantial packages. Do not implement in parallel or ask the user to copy the prompt.
+
+Report the run directory, the background task ID when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
 
 After the executor process finishes, require its final message to contain `PREWALK_PHASE: SOL_REVIEW` and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the `codex-deepseek-subagent` skill's `repair`. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
 
@@ -127,6 +142,12 @@ After the executor process finishes, require its final message to contain `PREWA
 Treat `PREWALK_PHASE: DEEPSEEK_EXECUTE` and legacy `PREWALK_PHASE: LUNA_EXECUTE` as explicit cancellation of Navigator's stop boundary. Retain the incoming `HANDOFF_ID` unchanged for the return package. Do not invoke Navigator prewalk again. Inspect worktree status, the retained first diff, and the handed-off evidence before reopening files.
 
 Adopt the handed-off TODO list. Re-plan only when repository evidence invalidates it; record the reason and keep the list bounded.
+
+### Publish progress
+
+Read [progress-format.md](references/progress-format.md) and the handoff's `PROGRESS CHANNEL` before inspecting files. Append the first event to the stated `progress.jsonl` before touching the repository, then keep appending one complete UTF-8 JSON line — flushed immediately — when a TODO starts, completes, or is replanned; before and after long builds and tests or a meaningful batch of edits; and when blocked, escalated, or complete. Include the sequence number, state, short summary, current TODO, known changed paths, validation status, and next step. Never include secrets, environment files, tokens, hidden reasoning, or raw command output.
+
+The progress channel is a snapshot for Navigator, not a completion signal: keep working and validating normally, and report the final status and last sequence in the return package.
 
 ### Execute and verify
 
@@ -143,7 +164,7 @@ Before finishing:
 
 Read [handoff-format.md](references/handoff-format.md). Return a concise completion status followed by one fenced, copy-ready package using the **Builder to Navigator** template. Generate it whether execution completed, became blocked, or was escalated.
 
-Include the original objective, inherited first edit, complete changed-path inventory, implementation decisions, exact validation results, unresolved risks, and the diff range or baseline Navigator should review. Carry the model/effort selection forward exactly as recorded in the handoff, note any deviation you observed, and do not assert your own model identity beyond those recorded values. Record which decisions Navigator retained and did not hand off, and if you escalated, the exact decision required with the evidence that forced it. Do not perform the Navigator review yourself.
+Include the original objective, inherited first edit, complete changed-path inventory, implementation decisions, exact validation results, unresolved risks, and the diff range or baseline Navigator should review. Carry the model/effort selection forward exactly as recorded in the handoff, note any deviation you observed, and do not assert your own model identity beyond those recorded values. Record which decisions Navigator retained and did not hand off, and if you escalated, the exact decision required with the evidence that forced it. Include the final progress status and last sequence, and do not perform the Navigator review yourself.
 
 ## Phase C: Navigator review
 
@@ -157,6 +178,8 @@ Enter this phase after the orchestrated Builder child returns or when the incomi
 
 Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
 
+If a progress file exists, read it as navigation context only. A missing or stale progress file is not proof of failure or of a hung process: inspect the background task and raw output before diagnosing, and report the last event time rather than inventing activity. Never treat the final progress event as approval evidence — verify the actual diff.
+
 An `escalated` or `blocked` return is reviewed the same way, with the preserved work and the evidence checked before the request is accepted. If the requested decision is genuinely Navigator's, make it explicitly — or take it to the user when it is a product, scope, or risk decision — and, if work should continue, issue one fresh handoff carrying that decision. Except for carrying an escalation decision forward, do not regenerate another executor prompt unless the user requests remediation, and never loop executor dispatches.
 
 ## Guardrails
@@ -169,4 +192,6 @@ An `escalated` or `blocked` return is reviewed the same way, with the preserved 
 - Do not guess requirement, architecture, or scope decisions; return them to Navigator.
 - Do not self-redispatch after an escalation return; Navigator decides first.
 - Do not expose secrets, full environment files, or irrelevant diffs in handoff prompts.
+- Do not put credentials in a handoff, progress file, log, or commit; configure connections only through the host's managed path.
+- Do not treat progress events as proof of completion or as a substitute for reviewing the actual diff.
 - Do not claim end-to-end completion before Navigator has inspected the returned work and actual diff.

@@ -42,6 +42,14 @@ MODEL AND EFFORT SELECTION
 - Validated executor launch model / effort: [values in the actual launch command after validation]
 - Validation evidence: [commands and observed status/config output; never credentials]
 
+PROGRESS CHANNEL
+- Run directory: [absolute path outside the repository]
+- Handoff package: [absolute path in the run directory]
+- Progress file: [absolute run-dir/progress.jsonl]
+- Raw stdout / stderr: [absolute paths, e.g. run-dir/builder.out and run-dir/builder.err]
+- Progress protocol: [absolute path to the installed skill's references/progress-format.md]
+- Event requirements: read the protocol above; append one complete UTF-8 JSON line before inspecting files and at every TODO transition, long command, block, escalation, and completion. Include `seq`, an actual-clock `ts`, `handoff_id`, `state`, `summary`, `current_todo`, `changed_paths`, `validation`, `next`. Never include secrets or raw output.
+
 FIRST CREDIBLE EDIT ALREADY LANDED
 - Changed paths: [paths]
 - Pattern established: [what the edit demonstrates]
@@ -74,6 +82,7 @@ When finished or blocked, your final response must contain a concise status foll
 - Inherited Navigator first edit and every final changed path
 - Important implementation decisions and deviations from the handed-off trajectory
 - Exact test/build/lint commands and outcomes
+- Final progress status, last sequence number, and the progress-file path
 - Remaining failures, warnings, risks, and unverified areas
 - Baseline/diff range Navigator should inspect
 - An instruction for Navigator to review actual code and diff rather than trust the summary
@@ -100,6 +109,7 @@ EXECUTION STATUS
 - Review baseline/diff range: [starting commit, branch, or precise comparison]
 - Inherited unrelated worktree changes: [list]
 - Model/effort selection carried forward: [requested and effective Navigator values; requested and validated executor launch values; any deviation]
+- Progress channel: [progress-file path, final state, last sequence number]
 - Decision required from Navigator: [none, or the exact decision, the evidence that forced it, the options considered, and the smallest safe default]
 
 CHANGE TRAJECTORY
