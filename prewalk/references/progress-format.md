@@ -6,6 +6,8 @@ Use one run directory outside the repository, containing the handoff, `progress.
 
 Create `progress.jsonl` before inspecting the retained diff. Append one complete UTF-8 JSON object and newline per event, flushing each append. Only Builder writes this file; Navigator reads it. Do not buffer events until the run ends.
 
+On a resumed Builder turn, append to the same `progress.jsonl`, continue increasing `seq`, and set the optional `turn` field to the Builder turn number. Never overwrite or replace an earlier turn's events; raw per-turn event files are separate artifacts and the progress file is cumulative.
+
 Write an event:
 
 - when execution starts;
@@ -16,10 +18,10 @@ Write an event:
 Each event contains:
 
 ```json
-{"ts":"2026-10-24T12:00:00Z","handoff_id":"example","seq":1,"state":"started","summary":"Inspecting the retained first edit","current_todo":"Inspect baseline","changed_paths":[],"validation":null,"next":"Implement the agreed slice"}
+{"ts":"2026-10-24T12:00:00Z","handoff_id":"example","seq":1,"turn":1,"state":"started","summary":"Inspecting the retained first edit","current_todo":"Inspect baseline","changed_paths":[],"validation":null,"next":"Implement the agreed slice"}
 ```
 
-`seq` increases from 1. Read `ts` from the actual clock for every event; never estimate timestamps. `state` is one of `started`, `step_started`, `step_completed`, `validation`, `heartbeat`, `blocked`, `escalated`, or `completed`. Keep `summary`, `current_todo`, and `next` short. `changed_paths` is the known inventory so far. `validation` is `null` or an object with a redacted `command`, `status` (`running`, `passed`, `failed`, or `not_run`), and concise `result`.
+`seq` increases from 1 and continues across resumed turns. `turn` is optional and carries the Builder turn number (one process invocation), not a model-call index; model-call counts belong in `usage.json`, not progress. Read `ts` from the actual clock for every event; never estimate timestamps. `state` is one of `started`, `step_started`, `step_completed`, `validation`, `heartbeat`, `blocked`, `escalated`, or `completed`. Keep `summary`, `current_todo`, and `next` short. `changed_paths` is the known inventory so far. `validation` is `null` or an object with a redacted `command`, `status` (`running`, `passed`, `failed`, or `not_run`), and concise `result`.
 
 Record heartbeats at natural checkpoints; do not claim a timer or fixed reporting interval that the executor cannot guarantee. Do not include hidden reasoning, code dumps, credentials, environment files, tokens, or unredacted command output. Never put a secret in a command line or edit raw stdout/stderr afterward: raw captures must remain intact, and any suspected secret exposure must be reported for redaction/rotation. Progress is self-reported status until Navigator verifies the process and worktree.
 

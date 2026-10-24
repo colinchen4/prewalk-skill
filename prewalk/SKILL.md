@@ -1,6 +1,6 @@
 ---
 name: prewalk
-description: "Run an orchestrated coding handoff: Navigator investigates and lands one credible edit, dispatches a configured native DeepSeek subagent to complete mechanical implementation, builds/tests, and debugging at the Builder execution boundary, waits for it, then Navigator reviews the actual final diff. Also resume execution or review from PREWALK_PHASE markers, including an escalated executor return that asks Navigator for a decision. Use when the user asks for Prewalk, Navigator-to-Builder execution, a Builder executor with Navigator review, frontier-model preparation before delegated coding, execution from a Prewalk package, or final review of returned executor work."
+description: "Run an orchestrated coding handoff: Navigator investigates and lands one credible edit, dispatches a configured native DeepSeek subagent to complete mechanical implementation, builds/tests, and debugging at the Builder execution boundary, waits for it, then Navigator reviews the actual final diff. Also resume execution or review from PREWALK_PHASE markers, resume the same Builder session with a delta, including an escalated executor return that asks Navigator for a decision. Use when the user asks for Prewalk, Navigator-to-Builder execution, a Builder executor with Navigator review, frontier-model preparation before delegated coding, execution from a Prewalk package, or final review of returned executor work."
 ---
 
 # Prewalk
@@ -13,6 +13,7 @@ Choose the mode from the incoming request:
 
 - **Orchestrated Navigator run:** Use when no phase marker exists. Run Navigator prewalk, dispatch Builder, wait, then perform Navigator review in the same parent task.
 - **Builder execution:** Use when the prompt begins with `PREWALK_PHASE: DEEPSEEK_EXECUTE` or the legacy marker `PREWALK_PHASE: LUNA_EXECUTE`. Complete the executor phase and return a Navigator review package.
+- **Builder resume:** Use when the prompt begins with `PREWALK_PHASE: DEEPSEEK_RESUME`. Continue the recorded Builder session at the same boundary; do not rerun Navigator prewalk or start a new session.
 - **Navigator review:** Use when the incoming prompt begins with `PREWALK_PHASE: SOL_REVIEW`.
 
 Never apply the stop-after-one-edit boundary to Builder execution. Never repeat Navigator investigation in executor mode unless retained evidence is contradicted by the repository.
@@ -63,6 +64,7 @@ A selection is not proof that it took effect. Before any implementation edit or 
 - Treat Builder as the execution role; "Builder boundary" describes the responsibility boundary, not a required model name.
 - Dispatch only through the managed DeepSeek executor surface: a `codex exec` child process with `model=deepseek-flash`, `model_provider="deepseek"`, `model_reasoning_effort="max"`. Do not dispatch with the native `spawn_agent` tool: on desktop builds ≥ 0.146 the collaboration namespace is gated to the ChatGPT backend, so a native spawn cannot route a child to the DeepSeek provider and fails with a model-unsupported 400 (see openai/codex#31882, openai/codex#36957).
 - Run the executor via the staged desktop runtime managed by the separate `codex-deepseek-subagent` skill (its `status`/`test`/`repair` commands own the runtime path, provider config, catalog, and credential). Do not hand-maintain TOML, JSON, credentials, or runtime copies for this contract.
+- Keep one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, and permission boundary. Read [session-continuity.md](references/session-continuity.md) before dispatch and review. The initial turn is the full handoff; a supplement, escalation decision, or rework resumes the recorded session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta. Keep stable role and execution instructions before variable run metadata; append deltas instead of rewriting earlier prompts.
 - Configuration and routing verification belong to the `codex-deepseek-subagent` skill; if its status is not `configured`/`ready`, run its `repair` before dispatching.
 - Give the executor a self-contained text prompt (the handoff package) because it receives no parent context. Launch it from the task workspace with a writable sandbox so it can edit the repository, and set `CODEX_HOME` to the Codex home that holds the managed configuration.
 - DeepSeek is text-only. Inspect visual inputs in Navigator and encode all necessary visual facts, paths, constraints, and acceptance criteria in the handoff.
@@ -79,7 +81,7 @@ Escalate only when the work cannot proceed correctly without a decision that bel
 
 Ordinary implementation difficulties, compile errors, failing tests, flaky environments, and unclear library behavior are executor work: diagnose them, try the documented approach, and report what was tried. Do not escalate at the first failed check, and do not guess a requirement to keep moving.
 
-On escalation, stop the affected area, preserve the work already done, and return the standard **Builder to Navigator** package with state `escalated`. State the exact decision required, the evidence that forced it, the options considered, and the smallest safe default. Navigator makes that decision and, if work should continue, issues one fresh handoff carrying it; the executor never redispatches itself.
+On escalation, stop the affected area, preserve the work already done, and return the standard **Builder to Navigator** package with state `escalated`. State the exact decision required, the evidence that forced it, the options considered, and the smallest safe default. Navigator makes that decision and, if work should continue, resumes the same recorded Builder session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta carrying it (see Phase A); only explicit user authorization permits a cold-recovery full handoff. The executor never redispatches itself.
 
 ## Phase A: Navigator prewalk and orchestration
 
@@ -121,31 +123,53 @@ Make exactly one coherent implementation edit. It may include inseparable adjace
 
 ### Dispatch at the Builder boundary
 
-Read [handoff-format.md](references/handoff-format.md) and [progress-format.md](references/progress-format.md), then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
+Read [handoff-format.md](references/handoff-format.md), [progress-format.md](references/progress-format.md), and [session-continuity.md](references/session-continuity.md), then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
 
-Allocate one run directory outside the repository containing the handoff package, `progress.jsonl`, and the raw stdout/stderr files, and give their absolute paths in the handoff's `PROGRESS CHANNEL` section. When the executor surface is ready (per the `codex-deepseek-subagent` skill status), create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, then launch the managed executor with the exec tool using this shape (adjust quoting for the active shell; `<` redirects the package into stdin):
+Allocate one run directory outside the repository containing the full handoff package, `run.json`, `progress.jsonl`, and per-turn artifacts (`turn-001-events.jsonl`, `turn-001.err`, `turn-001-final.txt`, and cumulative `usage.json`). Give their absolute paths in the handoff's `PROGRESS CHANNEL` section. `run.json` holds only non-secret routing state: host, Builder session id once observed, repository/worktree, branch, model/effort, permission boundary, next turn number, and artifact paths. Do not put credentials, prompts, or conversation content in it.
+
+When the executor surface is ready (per the `codex-deepseek-subagent` skill status), create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, then launch the managed executor with the exec tool using this shape (adjust quoting for the active shell; `<` redirects the package into stdin, and `--json` captures the event stream as the turn artifact):
 
 ```sh
-CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec --skip-git-repo-check -s workspace-write -C "<task workspace>" -m deepseek-flash -c model_provider="\"deepseek\"" -c model_reasoning_effort="\"max\"" - < "<handoff-package-file>"
+CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec --skip-git-repo-check -s workspace-write -C "<task workspace>" -m deepseek-flash -c model_provider="\"deepseek\"" -c model_reasoning_effort="\"max\"" --json - < "<handoff-package-file>" > "<run-dir>/turn-001-events.jsonl" 2> "<run-dir>/turn-001.err"
 ```
 
 where `<staged-codex.exe>` is the desktop runtime path reported by the `codex-deepseek-subagent` skill (run its `status`). Keep `-s workspace-write`: sandboxed execution is part of this contract and works on paths with spaces as long as the staged runtime bundle is complete (`codex.exe`, `codex-code-mode-host.exe`, `codex-windows-sandbox-setup.exe`, `codex-command-runner.exe` — the last one is required for any sandboxed command to spawn; a staged copy missing it fails every command with `CreateProcessWithLogonW failed: 2`). Do not switch to `danger-full-access` or otherwise broaden permissions on your own initiative, and do not silently downgrade the sandbox either: if you believe the invocation needs a change, ask the user once. Allow a long timeout or run it as a background task for substantial packages. Do not implement in parallel or ask the user to copy the prompt.
+
+After the process exits, run the installed adapter against that turn and write the final message and cumulative usage artifacts; use the path to the installed skill's `scripts/prewalk_runtime.py`:
+
+```sh
+python "<installed-prewalk>/scripts/prewalk_runtime.py" inspect --host codex --builder-turn 1 --events "<run-dir>/turn-001-events.jsonl" --final-message "<run-dir>/turn-001-final.txt" --usage "<run-dir>/usage.json"
+```
+
+Require the adapter's session id and final message. Record the session id in `run.json` for later turns. `usage.json` is cumulative schema_version 2 state: `calls` holds raw model-call records, `turns` holds one aggregate per Builder turn, and the same file is passed to later turns. The adapter reports provider usage and cost only when the stream actually contains them; missing usage means `unavailable`, not zero. Treat usage as observability evidence, never as proof of quality.
 
 Report the run directory, the background task ID when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
 
 After the executor process finishes, require its final message to contain `PREWALK_PHASE: SOL_REVIEW` and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the `codex-deepseek-subagent` skill's `repair`. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
 
+### Resume the Builder session
+
+When continuing the same task and boundary — a supplement, an escalation decision, or rework — do not start another Builder session. Read [session-continuity.md](references/session-continuity.md), load `run.json`, and send only a `PREWALK_PHASE: DEEPSEEK_RESUME` delta from [handoff-format.md](references/handoff-format.md). The delta repeats the unchanged `HANDOFF_ID` and expected Builder session id and carries only the new decision, new evidence or constraints, current TODO state, progress path, and the normal `SOL_REVIEW` return requirement. Do not resend the original objective, repository inventory, old evidence, first edit, or full handoff.
+
+Launch the resume from the original workspace with the same `CODEX_HOME`. Do not add sandbox, model, effort, or provider flags: the resumed session inherits its recorded boundary. Capture a new turn artifact and never overwrite earlier turns:
+
+```sh
+cd "<original workspace>" && CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec resume --json "<builder-session-id>" - < "<run-dir>/turn-002-resume.txt" > "<run-dir>/turn-002-events.jsonl" 2> "<run-dir>/turn-002.err"
+```
+
+Then run the adapter with `--builder-turn "<next-turn>" --expected-session "<builder-session-id>" --usage "<run-dir>/usage.json"`; for turn 2 and later the same cumulative usage file is required prior state. A changed session id, missing or incompatible prior usage, or a Kimi wire/prior call-count disagreement is a failure, not a new baseline. Confirm the inherited workspace and model/effort boundary from the launch and usage evidence; a mismatch means the resume crossed a boundary and must be reported. A resume failure must not silently cold-start: preserve the work and report the routing/session error. Cold recovery requires explicit user authorization and a recorded reason, and starts a new Builder session. Start a different session for a different objective, repository/worktree, branch, model/effort/provider, or permission boundary. Prefer a model or effort change at an observed compaction or execution boundary where context must be rebuilt anyway, but never postpone a correctness-required change to protect cache. Do not invent forced-compaction commands or send keepalive prompts.
+
 ## Phase B: Builder execution
 
 ### Activate executor mode
 
-Treat `PREWALK_PHASE: DEEPSEEK_EXECUTE` and legacy `PREWALK_PHASE: LUNA_EXECUTE` as explicit cancellation of Navigator's stop boundary. Retain the incoming `HANDOFF_ID` unchanged for the return package. Do not invoke Navigator prewalk again. Inspect worktree status, the retained first diff, and the handed-off evidence before reopening files.
+Treat `PREWALK_PHASE: DEEPSEEK_EXECUTE`, `PREWALK_PHASE: DEEPSEEK_RESUME`, and legacy `PREWALK_PHASE: LUNA_EXECUTE` as explicit cancellation of Navigator's stop boundary. Retain the incoming `HANDOFF_ID` unchanged for the return package. Do not invoke Navigator prewalk again. On the initial turn, inspect worktree status, the retained first diff, and the handed-off evidence before reopening files; on a resumed turn, inspect current worktree state and follow only the new delta within the existing context.
 
 Adopt the handed-off TODO list. Re-plan only when repository evidence invalidates it; record the reason and keep the list bounded.
 
 ### Publish progress
 
-Read [progress-format.md](references/progress-format.md) and the handoff's `PROGRESS CHANNEL` before inspecting files. Append the first event to the stated `progress.jsonl` before touching the repository, then keep appending one complete UTF-8 JSON line — flushed immediately — when a TODO starts, completes, or is replanned; before and after long builds and tests or a meaningful batch of edits; and when blocked, escalated, or complete. Include the sequence number, state, short summary, current TODO, known changed paths, validation status, and next step. Never include secrets, environment files, tokens, hidden reasoning, or raw command output.
+Read [progress-format.md](references/progress-format.md) and the handoff's `PROGRESS CHANNEL` before inspecting files. Append the first event to the stated `progress.jsonl` before touching the repository, then keep appending one complete UTF-8 JSON line — flushed immediately — when a TODO starts, completes, or is replanned; before and after long builds and tests or a meaningful batch of edits; and when blocked, escalated, or complete. On a resumed turn, append to the same progress file and continue `seq`; set the optional `turn` field to the Builder turn number. Include the sequence number, state, short summary, current TODO, known changed paths, validation status, and next step. Never include secrets, environment files, tokens, hidden reasoning, or raw command output.
 
 The progress channel is a snapshot for Navigator, not a completion signal: keep working and validating normally, and report the final status and last sequence in the return package.
 
@@ -176,11 +200,11 @@ Enter this phase after the orchestrated Builder child returns or when the incomi
 - Test quality and gaps between claimed and observed validation
 - Unrelated or accidental changes
 
-Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
+Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Before accepting the return, inspect `run.json` and that turn's `prewalk_runtime.py` output; require the final message to contain `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`, and require the observed Builder session id to match the recorded one. Inspect the cumulative schema_version 2 usage artifact: `turns` must be one aggregate per Builder turn, `calls` must be the raw model-call records, and re-inspecting the same turn must replace rather than duplicate its aggregate. Record per-Builder-turn and per-call usage, cache ratio with its denominator, and cost status as observability only; they are not quality evidence and do not prove a cache benefit. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
 
 If a progress file exists, read it as navigation context only. A missing or stale progress file is not proof of failure or of a hung process: inspect the background task and raw output before diagnosing, and report the last event time rather than inventing activity. Never treat the final progress event as approval evidence — verify the actual diff.
 
-An `escalated` or `blocked` return is reviewed the same way, with the preserved work and the evidence checked before the request is accepted. If the requested decision is genuinely Navigator's, make it explicitly — or take it to the user when it is a product, scope, or risk decision — and, if work should continue, issue one fresh handoff carrying that decision. Except for carrying an escalation decision forward, do not regenerate another executor prompt unless the user requests remediation, and never loop executor dispatches.
+An `escalated` or `blocked` return is reviewed the same way, with the preserved work and the evidence checked before the request is accepted. If the requested decision is genuinely Navigator's, make it explicitly — or take it to the user when it is a product, scope, or risk decision — and, if work should continue, resume the same recorded Builder session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta carrying that decision (see Phase A). Do not issue a fresh full handoff unless the user explicitly authorizes cold recovery or the task or boundary materially changed. Only a genuinely different task or boundary starts a new Builder session without calling it recovery. Do not self-redispatch or loop executor dispatches.
 
 ## Guardrails
 
@@ -191,6 +215,9 @@ An `escalated` or `blocked` return is reviewed the same way, with the preserved 
 - Do not escalate ordinary implementation, compile, or test failures; diagnose them in the executor.
 - Do not guess requirement, architecture, or scope decisions; return them to Navigator.
 - Do not self-redispatch after an escalation return; Navigator decides first.
+- Do not silently cold-start a new Builder session after a resume failure or an expired provider cache; cold recovery requires explicit user authorization and a recorded reason.
+- Do not label model-call usage records as Builder turns; keep `calls` and `turns` distinct in the cumulative usage artifact.
+- Do not send keepalive prompts or force compaction merely to chase cache hits; cache is an optimization, not a correctness goal.
 - Do not expose secrets, full environment files, or irrelevant diffs in handoff prompts.
 - Do not put credentials in a handoff, progress file, log, or commit; configure connections only through the host's managed path.
 - Do not treat progress events as proof of completion or as a substitute for reviewing the actual diff.

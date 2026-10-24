@@ -42,13 +42,24 @@ MODEL AND EFFORT SELECTION
 - Validated executor launch model / effort: [values in the actual launch command after validation]
 - Validation evidence: [commands and observed status/config output; never credentials]
 
+SESSION CONTINUITY
+- Builder host: [codex | kimi]
+- Builder session: [the initial turn starts a new resumable session; record the observed session id in run.json]
+- Builder turn: [next Builder turn number; pass as --builder-turn]
+- Expected session on resume: [recorded id, or not applicable on the initial turn]
+- Turn artifacts: [absolute run-dir/turn-001-events.jsonl, turn-001.err, turn-001-final.txt, and cumulative usage.json]
+- Boundary: [workspace, branch, model/effort, permission boundary that must match to resume this session]
+
 PROGRESS CHANNEL
 - Run directory: [absolute path outside the repository]
+- Run record: [absolute run-dir/run.json with host, session id, workspace, branch, model/effort, permission boundary, next turn, and artifact paths; no secrets or conversation]
 - Handoff package: [absolute path in the run directory]
 - Progress file: [absolute run-dir/progress.jsonl]
-- Raw stdout / stderr: [absolute paths, e.g. run-dir/builder.out and run-dir/builder.err]
+- Turn artifacts: [absolute run-dir/turn-001-events.jsonl, turn-001.err, turn-001-final.txt; never overwrite earlier turns]
+- Usage artifact: [absolute run-dir/usage.json; cumulative schema_version 2, calls plus one aggregate per Builder turn; for --builder-turn >1 this file is required prior state]
+- Raw stdout / stderr: [the turn event file and turn stderr file, e.g. run-dir/turn-001-events.jsonl and run-dir/turn-001.err]
 - Progress protocol: [absolute path to the installed skill's references/progress-format.md]
-- Event requirements: read the protocol above; append one complete UTF-8 JSON line before inspecting files and at every TODO transition, long command, block, escalation, and completion. Include `seq`, an actual-clock `ts`, `handoff_id`, `state`, `summary`, `current_todo`, `changed_paths`, `validation`, `next`. Never include secrets or raw output.
+- Event requirements: read the protocol above; append one complete UTF-8 JSON line before inspecting files and at every TODO transition, long command, block, escalation, and completion. Include `seq`, an actual-clock `ts`, `handoff_id`, optional `turn`, `state`, `summary`, `current_todo`, `changed_paths`, `validation`, `next`. Never include secrets or raw output.
 
 FIRST CREDIBLE EDIT ALREADY LANDED
 - Changed paths: [paths]
@@ -71,6 +82,7 @@ EXECUTION INSTRUCTIONS
 6. Treat ordinary implementation, compile, and test failures as your own work; they are not escalation.
 7. Escalate only for a genuinely unresolved requirement ambiguity or a new lead-level direction decision. Preserve existing work and return the standard SOL_REVIEW package with state `escalated`, the evidence, the options considered, the smallest safe default, and the exact decision required instead of guessing.
 8. Do not perform final approval or Navigator review.
+9. Keep the stable role and execution instructions unchanged; append new deltas instead of rewriting earlier prompts. Do not start a cold Builder session after a resume failure or expired cache; report the routing/session error instead.
 
 MANDATORY RETURN TO NAVIGATOR
 When finished or blocked, your final response must contain a concise status followed by one fenced, copy-ready package beginning exactly with `PREWALK_PHASE: SOL_REVIEW`. It must contain:
@@ -88,6 +100,40 @@ When finished or blocked, your final response must contain a concise status foll
 - An instruction for Navigator to review actual code and diff rather than trust the summary
 
 Do not review or approve your own implementation. Return control to the parent Navigator agent.
+```
+
+## Navigator to Builder resume delta
+
+Use this instead of the full package when continuing the same Builder session and boundary. Put the delta in a small text file in the run directory and keep the original stable handoff as the unchanged prefix; do not rewrite it.
+
+```text
+PREWALK_PHASE: DEEPSEEK_RESUME
+HANDOFF_ID: [unchanged ID from the initial handoff]
+BUILDER_SESSION_ID: [expected session id recorded in run.json]
+BUILDER_TURN: [next Builder turn number]
+
+You are resuming the existing Builder session at the same execution boundary. Continue from your existing context; do not repeat Navigator prewalk or connection setup. Inspect the current worktree state before editing, preserve unrelated changes, and append progress using the next sequence number.
+
+NEW DECISION OR CORRECTION
+[Only the new Navigator decision, correction, or scope/constraint change. Omit sections that do not apply.]
+
+NEW EVIDENCE
+[Only evidence discovered since the prior turn, with paths and observed outcomes.]
+
+CURRENT TODO STATE
+- [status] [item]
+- [status] [item]
+
+PROGRESS CHANNEL
+- Progress file: [absolute run-dir/progress.jsonl]
+- Turn artifacts for this turn: [absolute run-dir/turn-002-events.jsonl, turn-002.err, turn-002-final.txt]
+- Usage artifact: [absolute run-dir/usage.json; cumulative schema_version 2, required prior state for --builder-turn >1]
+- Event requirements: append to the existing progress file, continue increasing `seq`, and set optional `turn` to [the resumed Builder turn number]. Never overwrite earlier events.
+
+RETURN REQUIREMENT
+Return a concise status followed by one fenced package beginning exactly `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`. Include changed paths, exact validation, remaining risks, per-Builder-turn vs per-model-call usage/observability limitations, and the final progress sequence. Do not self-approve.
+
+Do not resend or restate the original objective, repository inventory, old evidence, first edit, or full handoff. If the resumed context is unavailable or inconsistent, stop and report; do not restate the full handoff or cold-start without explicit user authorization.
 ```
 
 ## Builder to Navigator
@@ -110,6 +156,8 @@ EXECUTION STATUS
 - Inherited unrelated worktree changes: [list]
 - Model/effort selection carried forward: [requested and effective Navigator values; requested and validated executor launch values; any deviation]
 - Progress channel: [progress-file path, final state, last sequence number]
+- Builder session: [session id, Builder turn count, model-call count, and whether the observed id matched the expected id]
+- Usage/cost evidence: [schema_version 2 cumulative usage; per-Builder-turn aggregates and per-model-call tokens, cache ratio with its denominator, cost status unavailable or reported; observability only, not quality evidence]
 - Decision required from Navigator: [none, or the exact decision, the evidence that forced it, the options considered, and the smallest safe default]
 
 CHANGE TRAJECTORY
@@ -134,7 +182,8 @@ REVIEW INSTRUCTIONS
 2. Verify requirement coverage and that the implementation addresses the evidenced cause.
 3. Check correctness, error paths, compatibility, security, unintended changes, and test adequacy.
 4. Verify the carried-forward model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as proof of its model.
-5. Run targeted read-only checks or tests where useful.
-6. Report findings by severity with precise file and line references. If there are no findings, state that clearly and list residual risks or tests not performed.
-7. Do not edit code unless the user explicitly requests remediation.
+5. Verify the recorded Builder session id, the per-turn artifacts, and the schema_version 2 cumulative usage: `turns` vs `calls`, idempotent re-inspection, no older-turn rewrite, and usage/cost status; usage is observability evidence, not quality evidence.
+6. Run targeted read-only checks or tests where useful.
+7. Report findings by severity with precise file and line references. If there are no findings, state that clearly and list residual risks or tests not performed.
+8. Do not edit code unless the user explicitly requests remediation.
 ```
