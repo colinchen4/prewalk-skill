@@ -1,4 +1,4 @@
 interface:
   display_name: "Prewalk"
-  short_description: "DeepSeek execution with SOL review"
-  default_prompt: "Use $prewalk to prewalk this coding task in SOL, execute it with the managed DeepSeek executor, and return to SOL for final review."
+  short_description: "Builder execution with Navigator review"
+  default_prompt: "Use $prewalk to prewalk this coding task in Navigator, execute it with the managed Builder executor, and return to Navigator for final review."

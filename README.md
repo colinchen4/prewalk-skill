@@ -2,9 +2,9 @@
 
 **prewalk-skill** provides two [Codex skills](https://developers.openai.com/codex/skills/) that run an orchestrated coding handoff:
 
-**SOL (your main Codex model) → model/effort preflight → prewalk + first credible edit → DeepSeek-V4.1-Flash (`deepseek-flash`, max reasoning) executes → SOL reviews the actual diff.**
+**Navigator (your main Codex model) → model/effort preflight → prewalk + first credible edit → Builder (DeepSeek-V4.1-Flash, `deepseek-flash`, max reasoning) executes → Navigator reviews the actual diff.**
 
-- `prewalk/` — the orchestration skill: model/effort preflight, SOL investigation, confidence gate, one atomic edit, judgment-density delegation, dispatch, bounded escalation, and final review.
+- `prewalk/` — the orchestration skill: model/effort preflight, Navigator investigation, confidence gate, one atomic edit, judgment-density delegation, dispatch, bounded escalation, and final review.
 - `codex-deepseek-subagent/` — the management skill that owns the DeepSeek executor surface: provider config, merged model catalog, credential storage, desktop runtime staging, and acceptance tests.
 
 ## Why not `spawn_agent(agent_type="DeepSeek")`
@@ -47,7 +47,7 @@ Ask in plain language, e.g.:
 [$prewalk] 把这三个批改问题修掉，测试由默认模型进行
 ```
 
-SOL runs the prewalk and lands one edit, dispatches the handoff package to the DeepSeek executor process, waits, then reviews the real worktree diff before reporting.
+Navigator runs the prewalk and lands one edit, dispatches the handoff package to the Builder executor process, waits, then reviews the real worktree diff before reporting.
 
 ## Notes
 
