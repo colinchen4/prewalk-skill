@@ -1,35 +1,52 @@
 ---
 name: prewalk
-description: "Run an orchestrated coding handoff: Navigator investigates and lands one credible edit, dispatches a configured native DeepSeek subagent to complete mechanical implementation, builds/tests, and debugging at the Builder execution boundary, waits for it, then Navigator reviews the actual final diff. Also resume execution or review from PREWALK_PHASE markers, resume the same Builder session with a delta, including an escalated executor return that asks Navigator for a decision. Use when the user asks for Prewalk, Navigator-to-Builder execution, a Builder executor with Navigator review, frontier-model preparation before delegated coding, execution from a Prewalk package, or final review of returned executor work."
+description: "Run an orchestrated coding handoff: Navigator (the parent agent on the selected harness) investigates and lands one credible edit, selects a harness adapter, dispatches a configured Builder executor (possibly on a different harness or model vendor) to complete mechanical implementation, builds/tests, and debugging at the Builder execution boundary, waits for it, then Navigator reviews the actual final diff. Also resume execution or review from PREWALK_PHASE markers, resume the same Builder session with a delta, including an escalated executor return that asks Navigator for a decision. Use when the user asks for Prewalk, Navigator-to-Builder execution, a Builder executor with Navigator review, frontier-model preparation before delegated coding, execution from a Prewalk package, or final review of returned executor work."
 ---
 
 # Prewalk
 
-Transfer an evidence-backed coding trajectory from Navigator through a native DeepSeek executor and back to Navigator review. Do not substitute a prose plan for contact with the code.
+Transfer an evidence-backed coding trajectory from Navigator through a configured Builder executor and back to Navigator review. Do not substitute a prose plan for contact with the code.
+
+## Roles and harness independence
+
+- **Navigator** is the parent agent that keeps the plan, requirement and ambiguity interpretation, architecture and correctness-critical choices, and final review. It runs on whatever harness and model the user selected for the parent session.
+- **Builder** is the execution role. It implements, debugs, validates, and reports; it does not perform the final review. A host adapter determines how Builder is launched, resumed, and observed.
+- Core orchestration is harness-neutral. Navigator and Builder may use different harnesses, model vendors, and models. The shared contract is the handoff package, phase markers, progress channel, and runtime-extracted session/usage artifacts — not a particular vendor command.
 
 ## Select the run mode
 
 Choose the mode from the incoming request:
 
-- **Orchestrated Navigator run:** Use when no phase marker exists. Run Navigator prewalk, dispatch Builder, wait, then perform Navigator review in the same parent task.
-- **Builder execution:** Use when the prompt begins with `PREWALK_PHASE: DEEPSEEK_EXECUTE` or the legacy marker `PREWALK_PHASE: LUNA_EXECUTE`. Complete the executor phase and return a Navigator review package.
-- **Builder resume:** Use when the prompt begins with `PREWALK_PHASE: DEEPSEEK_RESUME`. Continue the recorded Builder session at the same boundary; do not rerun Navigator prewalk or start a new session.
-- **Navigator review:** Use when the incoming prompt begins with `PREWALK_PHASE: SOL_REVIEW`.
+- **Orchestrated Navigator run:** Use when no phase marker exists. Run Navigator prewalk, select an adapter and dispatch Builder, wait, then perform Navigator review in the same parent task.
+- **Builder execution:** Use when the prompt begins with `PREWALK_PHASE: BUILDER_EXECUTE`. Legacy `PREWALK_PHASE: DEEPSEEK_EXECUTE` and `PREWALK_PHASE: LUNA_EXECUTE` identify the same phase and remain accepted for existing sessions. Complete the executor phase and return a Navigator review package.
+- **Builder resume:** Use when the prompt begins with `PREWALK_PHASE: BUILDER_RESUME`. Legacy `PREWALK_PHASE: DEEPSEEK_RESUME` identifies the same phase and remains accepted. Continue the recorded Builder session at the same boundary; do not rerun Navigator prewalk or start a new session.
+- **Navigator review:** Use when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW`. Legacy `PREWALK_PHASE: SOL_REVIEW` identifies the same phase and remains accepted.
 
-Never apply the stop-after-one-edit boundary to Builder execution. Never repeat Navigator investigation in executor mode unless retained evidence is contradicted by the repository.
+Legacy markers exist for compatibility with sessions and external manager scripts that predate the neutral names. Do not rename markers in manager scripts outside this skill. Never apply the stop-after-one-edit boundary to Builder execution, and never repeat Navigator investigation in executor mode unless retained evidence is contradicted by the repository.
+
+## Select and validate the adapter
+
+Adapter selection and capability validation happen before model/effort dispatch:
+
+1. Read [adapters/README.md](adapters/README.md) and the selected `adapters/<host>.md`.
+2. Identify the Navigator host (the current parent harness) and the Builder host (the configured executor). They may differ.
+3. Validate the capabilities the run requires: initial launch, resumable session, session identity, final-message extraction, permission boundary, and native artifact completeness. If a required capability is missing, stop and report it; do not invent a flag, session id, usage value, or final message.
+4. Record the Navigator host in `run.json` as `navigator_host` and the Builder adapter host id as `adapter_host`; pass the Builder adapter host id to the runtime adapter as `--host <host>`.
+
+Built-in adapter files cover `codex`, `kimi`, `claude-code`, and `dsh`. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
 
 ## First-use connection setup
 
-For an orchestrated Navigator run, check whether the managed executor is ready (the manager skill's `status`) before the model/effort preflight. Ask connection questions only when that status is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
+For an orchestrated Navigator run, check whether the selected Builder adapter reports a ready managed executor before the model/effort preflight. Ask connection questions only when that readiness is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
 
 When setup is needed, group the questions in one prompt:
 
 1. Host-native authentication for Navigator, if the parent session has none.
-2. Builder provider base URL — default: the managed default `https://api.deepseek.com`.
-3. API key only through the host's secure prompt or stdin. Never echo it, and never put it in a handoff, progress file, log, or commit.
+2. Builder provider or endpoint, using the selected adapter's documented default only when that is what the user wants.
+3. Credentials only through the host's secure prompt or stdin. Never echo them, and never put them in a handoff, progress file, log, or commit.
 4. Protocol or model metadata only when the host needs it to describe a custom connection.
 
-Apply changes only through the host's managed configuration path — here the `codex-deepseek-subagent` skill (`setup`/`repair`, optional `--base-url`), never by hand-editing TOML, JSON, credentials, or runtime copies. A valid existing configuration is reused without asking again. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
+Apply changes only through the adapter's documented managed configuration path. Never hand-edit TOML, JSON, credentials, or runtime copies. A valid existing configuration is reused without asking again. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
 
 ## Model and effort preflight
 
@@ -39,8 +56,8 @@ Ask these four questions together:
 
 1. Which model should Navigator use? Default: the current parent model.
 2. Which thinking effort should Navigator use? Default: that model's configured effort.
-3. Which model should the executor use? Default: the managed executor model.
-4. Which thinking effort should the executor use? Default: that executor model's configured effort.
+3. Which model should the Builder executor use? Default: the selected adapter's managed executor model.
+4. Which thinking effort should the Builder executor use? Default: that executor model's configured effort.
 
 Accept **use defaults** as the answer to all four. If the host cannot ask questions, use the current managed defaults and report them; do not block an unattended run merely because the prompt is unavailable.
 
@@ -48,7 +65,7 @@ A selection is not proof that it took effect. Before any implementation edit or 
 
 - Each effort must be supported by its selected model; never silently substitute a different value.
 - If the requested Navigator model or effort is not the effective parent-session value, pause and ask the user to apply it through the host's native model/configuration mechanism, then rerun Prewalk. Do not claim that answering the prompt switched the parent session.
-- If the requested executor model or effort is unavailable through the managed executor surface, pause before dispatch. Do not hand-edit credentials or configuration, bypass the managed surface, or dispatch the default while reporting the requested model. A fixed managed-executor contract is not broadened by this preflight: the user must choose the surface's default pairing or switch to a managed Prewalk variant/surface that provides the requested model. Do not imply that arbitrary setup makes every model valid.
+- If the requested Builder model or effort is unavailable through the selected adapter's managed surface, pause before dispatch. Do not hand-edit credentials or configuration, bypass the managed surface, or dispatch a different model while reporting the requested one. The user must choose the surface's actual pairing or switch to an adapter/surface that provides the requested model. Do not imply that arbitrary setup makes every model valid.
 - Once validated, carry the effective values unchanged through execution, return, and review. A legacy handoff without these fields uses the values visible in its actual launch and parent session; do not re-ask.
 
 ## Shared rules
@@ -61,13 +78,12 @@ A selection is not proof that it took effect. Before any implementation edit or 
 
 ## Builder executor contract
 
-- Treat Builder as the execution role; "Builder boundary" describes the responsibility boundary, not a required model name.
-- Dispatch only through the managed DeepSeek executor surface: a `codex exec` child process with `model=deepseek-flash`, `model_provider="deepseek"`, `model_reasoning_effort="max"`. Do not dispatch with the native `spawn_agent` tool: on desktop builds ≥ 0.146 the collaboration namespace is gated to the ChatGPT backend, so a native spawn cannot route a child to the DeepSeek provider and fails with a model-unsupported 400 (see openai/codex#31882, openai/codex#36957).
-- Run the executor via the staged desktop runtime managed by the separate `codex-deepseek-subagent` skill (its `status`/`test`/`repair` commands own the runtime path, provider config, catalog, and credential). Do not hand-maintain TOML, JSON, credentials, or runtime copies for this contract.
-- Keep one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, and permission boundary. Read [session-continuity.md](references/session-continuity.md) before dispatch and review. The initial turn is the full handoff; a supplement, escalation decision, or rework resumes the recorded session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta. Keep stable role and execution instructions before variable run metadata; append deltas instead of rewriting earlier prompts.
-- Configuration and routing verification belong to the `codex-deepseek-subagent` skill; if its status is not `configured`/`ready`, run its `repair` before dispatching.
-- Give the executor a self-contained text prompt (the handoff package) because it receives no parent context. Launch it from the task workspace with a writable sandbox so it can edit the repository, and set `CODEX_HOME` to the Codex home that holds the managed configuration.
-- DeepSeek is text-only. Inspect visual inputs in Navigator and encode all necessary visual facts, paths, constraints, and acceptance criteria in the handoff.
+- Treat Builder as the execution role; "Builder boundary" describes the responsibility boundary, not a model name, vendor, or harness.
+- Dispatch only through the selected adapter's documented launch and resume paths. Do not substitute an in-harness subagent unless that adapter explicitly documents support for it, and do not hand-maintain provider configuration, credentials, or runtime copies.
+- Adapter configuration and routing verification belong to the adapter's managed surface. If its readiness status is not configured/ready, run the adapter's documented repair step before dispatching.
+- Keep one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, and permission boundary. Read [session-continuity.md](references/session-continuity.md) before dispatch and review. The initial turn is the full handoff; a supplement, escalation decision, or rework resumes the recorded session with a `PREWALK_PHASE: BUILDER_RESUME` delta. Keep stable role and execution instructions before variable run metadata; append deltas instead of rewriting earlier prompts.
+- Give the executor a self-contained handoff package because it receives no parent context. Launch it from the task workspace with the adapter's documented writable permission boundary so it can edit the repository.
+- If the Builder model cannot accept images, inspect visual inputs in Navigator and encode all necessary visual facts, paths, constraints, and acceptance criteria in the handoff. If it can accept images, still record the facts Navigator relied on.
 - Delegate by judgment density, not superficial difficulty. Navigator keeps the plan, requirement and ambiguity interpretation, architecture and correctness-critical choices, and final review. Builder takes mechanical implementation even when it is technically hard — pattern-following refactors, exhaustive edits, build/test wiring, and debugging against an observed failure — because the pattern is settled and the remaining work is bounded execution rather than new intent decisions.
 - Keep final judgment in Navigator. Builder implements, debugs, validates, and reports; it does not perform the final review.
 
@@ -81,7 +97,7 @@ Escalate only when the work cannot proceed correctly without a decision that bel
 
 Ordinary implementation difficulties, compile errors, failing tests, flaky environments, and unclear library behavior are executor work: diagnose them, try the documented approach, and report what was tried. Do not escalate at the first failed check, and do not guess a requirement to keep moving.
 
-On escalation, stop the affected area, preserve the work already done, and return the standard **Builder to Navigator** package with state `escalated`. State the exact decision required, the evidence that forced it, the options considered, and the smallest safe default. Navigator makes that decision and, if work should continue, resumes the same recorded Builder session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta carrying it (see Phase A); only explicit user authorization permits a cold-recovery full handoff. The executor never redispatches itself.
+On escalation, stop the affected area, preserve the work already done, and return the standard **Builder to Navigator** package with state `escalated`. State the exact decision required, the evidence that forced it, the options considered, and the smallest safe default. Navigator makes that decision and, if work should continue, resumes the same recorded Builder session with a `PREWALK_PHASE: BUILDER_RESUME` delta (legacy `DEEPSEEK_RESUME` is accepted) carrying it (see Phase A); only explicit user authorization permits a cold-recovery full handoff. The executor never redispatches itself.
 
 ## Phase A: Navigator prewalk and orchestration
 
@@ -123,47 +139,35 @@ Make exactly one coherent implementation edit. It may include inseparable adjace
 
 ### Dispatch at the Builder boundary
 
-Read [handoff-format.md](references/handoff-format.md), [progress-format.md](references/progress-format.md), and [session-continuity.md](references/session-continuity.md), then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
+Read [handoff-format.md](references/handoff-format.md), [progress-format.md](references/progress-format.md), [session-continuity.md](references/session-continuity.md), [adapters/README.md](adapters/README.md), and the selected `adapters/<host>.md`, then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
 
-Allocate one run directory outside the repository containing the full handoff package, `run.json`, `progress.jsonl`, and per-turn artifacts (`turn-001-events.jsonl`, `turn-001.err`, `turn-001-final.txt`, and cumulative `usage.json`). Give their absolute paths in the handoff's `PROGRESS CHANNEL` section. `run.json` holds only non-secret routing state: host, Builder session id once observed, repository/worktree, branch, model/effort, permission boundary, next turn number, and artifact paths. Do not put credentials, prompts, or conversation content in it.
+Allocate one run directory outside the repository containing the full handoff package, `run.json`, `progress.jsonl`, and per-turn artifacts (`turn-001-events.jsonl`, `turn-001.err`, `turn-001-final.txt`, and cumulative `usage.json`). Give their absolute paths in the handoff's `PROGRESS CHANNEL` section. `run.json` holds only non-secret routing state: `HANDOFF_ID`, Navigator host (`navigator_host`), Builder adapter host (`adapter_host`), Builder session id once observed, repository/worktree, branch, model/effort, permission boundary, next turn number, and artifact paths. Do not put credentials, prompts, or conversation content in it.
 
-When the executor surface is ready (per the `codex-deepseek-subagent` skill status), create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, then launch the managed executor with the exec tool using this shape (adjust quoting for the active shell; `<` redirects the package into stdin, and `--json` captures the event stream as the turn artifact):
+When the adapter reports the executor surface ready, create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, and launch through that adapter's documented initial command. Capture the native event stream and stderr into the turn artifacts. Do not implement in parallel or ask the user to copy the prompt.
 
-```sh
-CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec --skip-git-repo-check -s workspace-write -C "<task workspace>" -m deepseek-flash -c model_provider="\"deepseek\"" -c model_reasoning_effort="\"max\"" --json - < "<handoff-package-file>" > "<run-dir>/turn-001-events.jsonl" 2> "<run-dir>/turn-001.err"
-```
-
-where `<staged-codex.exe>` is the desktop runtime path reported by the `codex-deepseek-subagent` skill (run its `status`). Keep `-s workspace-write`: sandboxed execution is part of this contract and works on paths with spaces as long as the staged runtime bundle is complete (`codex.exe`, `codex-code-mode-host.exe`, `codex-windows-sandbox-setup.exe`, `codex-command-runner.exe` — the last one is required for any sandboxed command to spawn; a staged copy missing it fails every command with `CreateProcessWithLogonW failed: 2`). Do not switch to `danger-full-access` or otherwise broaden permissions on your own initiative, and do not silently downgrade the sandbox either: if you believe the invocation needs a change, ask the user once. Allow a long timeout or run it as a background task for substantial packages. Do not implement in parallel or ask the user to copy the prompt.
-
-After the process exits, run the installed adapter against that turn and write the final message and cumulative usage artifacts; use the path to the installed skill's `scripts/prewalk_runtime.py`:
+After the process exits, run the installed runtime adapter against that turn:
 
 ```sh
-python "<installed-prewalk>/scripts/prewalk_runtime.py" inspect --host codex --builder-turn 1 --events "<run-dir>/turn-001-events.jsonl" --final-message "<run-dir>/turn-001-final.txt" --usage "<run-dir>/usage.json"
+python "<installed-prewalk>/scripts/prewalk_runtime.py" inspect --host "<adapter-host>" --builder-turn 1 --events "<run-dir>/turn-001-events.jsonl" --final-message "<run-dir>/turn-001-final.txt" --usage "<run-dir>/usage.json"
 ```
 
-Require the adapter's session id and final message. Record the session id in `run.json` for later turns. `usage.json` is cumulative schema_version 2 state: `calls` holds raw model-call records, `turns` holds one aggregate per Builder turn, and the same file is passed to later turns. The adapter reports provider usage and cost only when the stream actually contains them; missing usage means `unavailable`, not zero. Treat usage as observability evidence, never as proof of quality.
+Require the adapter-defined process success, the runtime-extracted session id, and the runtime-extracted final message. Record the session id in `run.json` for later turns. `usage.json` is cumulative schema_version 2 state: `calls` holds raw model-call records, `turns` holds one aggregate per Builder turn, and the same file is passed to later turns. The runtime reports provider usage and cost only when the host stream actually contains them; missing usage means `unavailable`, not zero. Treat usage as observability evidence, never as proof of quality.
 
-Report the run directory, the background task ID when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
+Report the run directory, the background task id when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
 
-After the executor process finishes, require its final message to contain `PREWALK_PHASE: SOL_REVIEW` and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the `codex-deepseek-subagent` skill's `repair`. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
+After the executor process finishes, require its runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted) and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the adapter's documented repair/diagnostic step. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
 
 ### Resume the Builder session
 
-When continuing the same task and boundary — a supplement, an escalation decision, or rework — do not start another Builder session. Read [session-continuity.md](references/session-continuity.md), load `run.json`, and send only a `PREWALK_PHASE: DEEPSEEK_RESUME` delta from [handoff-format.md](references/handoff-format.md). The delta repeats the unchanged `HANDOFF_ID` and expected Builder session id and carries only the new decision, new evidence or constraints, current TODO state, progress path, and the normal `SOL_REVIEW` return requirement. Do not resend the original objective, repository inventory, old evidence, first edit, or full handoff.
+When continuing the same task and boundary — a supplement, an escalation decision, or rework — do not start another Builder session. Read [session-continuity.md](references/session-continuity.md), load `run.json`, and send only a `PREWALK_PHASE: BUILDER_RESUME` delta from [handoff-format.md](references/handoff-format.md). Legacy `PREWALK_PHASE: DEEPSEEK_RESUME` deltas are accepted for existing sessions. The delta repeats the unchanged `HANDOFF_ID` and expected Builder session id and carries only the new decision, new evidence or constraints, current TODO state, progress path, and the normal `NAVIGATOR_REVIEW` return requirement. Do not resend the original objective, repository inventory, old evidence, first edit, or full handoff.
 
-Launch the resume from the original workspace with the same `CODEX_HOME`. Do not add sandbox, model, effort, or provider flags: the resumed session inherits its recorded boundary. Capture a new turn artifact and never overwrite earlier turns:
-
-```sh
-cd "<original workspace>" && CODEX_HOME="$CODEX_HOME" "<staged-codex.exe>" exec resume --json "<builder-session-id>" - < "<run-dir>/turn-002-resume.txt" > "<run-dir>/turn-002-events.jsonl" 2> "<run-dir>/turn-002.err"
-```
-
-Then run the adapter with `--builder-turn "<next-turn>" --expected-session "<builder-session-id>" --usage "<run-dir>/usage.json"`; for turn 2 and later the same cumulative usage file is required prior state. A changed session id, missing or incompatible prior usage, or a Kimi wire/prior call-count disagreement is a failure, not a new baseline. Confirm the inherited workspace and model/effort boundary from the launch and usage evidence; a mismatch means the resume crossed a boundary and must be reported. A resume failure must not silently cold-start: preserve the work and report the routing/session error. Cold recovery requires explicit user authorization and a recorded reason, and starts a new Builder session. Start a different session for a different objective, repository/worktree, branch, model/effort/provider, or permission boundary. Prefer a model or effort change at an observed compaction or execution boundary where context must be rebuilt anyway, but never postpone a correctness-required change to protect cache. Do not invent forced-compaction commands or send keepalive prompts.
+Launch the resume from the original workspace with the selected adapter's documented resume command. Do not add model, effort, provider, or permission flags that were not part of the recorded launch; repeat only the grants the adapter documents as required on resume. Capture a new turn artifact and never overwrite earlier turns. Then run the runtime adapter with `--host "<adapter-host>" --builder-turn "<next-turn>" --expected-session "<builder-session-id>" --usage "<run-dir>/usage.json"`; for turn 2 and later the same cumulative usage file is required prior state. A changed session id, missing or incompatible prior usage, or a host-specific artifact disagreement is a failure, not a new baseline. Confirm the inherited workspace and model/effort boundary from the launch and usage evidence; a mismatch means the resume crossed a boundary and must be reported. A resume failure must not silently cold-start: preserve the work and report the routing/session error. Cold recovery requires explicit user authorization and a recorded reason, and starts a new Builder session. Start a different session for a different objective, repository/worktree, branch, model/effort/provider, or permission boundary. Prefer a model or effort change at an observed compaction or execution boundary where context must be rebuilt anyway, but never postpone a correctness-required change to protect cache. Do not invent forced-compaction commands or send keepalive prompts.
 
 ## Phase B: Builder execution
 
 ### Activate executor mode
 
-Treat `PREWALK_PHASE: DEEPSEEK_EXECUTE`, `PREWALK_PHASE: DEEPSEEK_RESUME`, and legacy `PREWALK_PHASE: LUNA_EXECUTE` as explicit cancellation of Navigator's stop boundary. Retain the incoming `HANDOFF_ID` unchanged for the return package. Do not invoke Navigator prewalk again. On the initial turn, inspect worktree status, the retained first diff, and the handed-off evidence before reopening files; on a resumed turn, inspect current worktree state and follow only the new delta within the existing context.
+Treat `PREWALK_PHASE: BUILDER_EXECUTE`, `PREWALK_PHASE: BUILDER_RESUME`, and the accepted legacy markers `PREWALK_PHASE: DEEPSEEK_EXECUTE`, `PREWALK_PHASE: DEEPSEEK_RESUME`, and `PREWALK_PHASE: LUNA_EXECUTE` as explicit cancellation of Navigator's stop boundary. Retain the incoming `HANDOFF_ID` unchanged for the return package. Do not invoke Navigator prewalk again. On the initial turn, inspect worktree status, the retained first diff, and the handed-off evidence before reopening files; on a resumed turn, inspect current worktree state and follow only the new delta within the existing context.
 
 Adopt the handed-off TODO list. Re-plan only when repository evidence invalidates it; record the reason and keep the list bounded.
 
@@ -186,13 +190,15 @@ Before finishing:
 
 ### Return to Navigator
 
-Read [handoff-format.md](references/handoff-format.md). Return a concise completion status followed by one fenced, copy-ready package using the **Builder to Navigator** template. Generate it whether execution completed, became blocked, or was escalated.
+Read [handoff-format.md](references/handoff-format.md). Return a concise completion status followed by one fenced, copy-ready package using the **Builder to Navigator** template. Generate it whether execution completed, became blocked, or was escalated. The package begins with `PREWALK_PHASE: NAVIGATOR_REVIEW`; the legacy `PREWALK_PHASE: SOL_REVIEW` remains accepted during migration.
+
+Use the runtime adapter's extracted final message as the turn's final assistant response. Do not hand-parse a native stream or substitute a draft message for it.
 
 Include the original objective, inherited first edit, complete changed-path inventory, implementation decisions, exact validation results, unresolved risks, and the diff range or baseline Navigator should review. Carry the model/effort selection forward exactly as recorded in the handoff, note any deviation you observed, and do not assert your own model identity beyond those recorded values. Record which decisions Navigator retained and did not hand off, and if you escalated, the exact decision required with the evidence that forced it. Include the final progress status and last sequence, and do not perform the Navigator review yourself.
 
 ## Phase C: Navigator review
 
-Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: SOL_REVIEW`. This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. Review for:
+Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. Review for:
 
 - Requirement coverage and behavioral correctness
 - Root-cause alignment and architectural consistency
@@ -200,11 +206,11 @@ Enter this phase after the orchestrated Builder child returns or when the incomi
 - Test quality and gaps between claimed and observed validation
 - Unrelated or accidental changes
 
-Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Before accepting the return, inspect `run.json` and that turn's `prewalk_runtime.py` output; require the final message to contain `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`, and require the observed Builder session id to match the recorded one. Inspect the cumulative schema_version 2 usage artifact: `turns` must be one aggregate per Builder turn, `calls` must be the raw model-call records, and re-inspecting the same turn must replace rather than duplicate its aggregate. Record per-Builder-turn and per-call usage, cache ratio with its denominator, and cost status as observability only; they are not quality evidence and do not prove a cache benefit. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
+Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Before accepting the return, inspect `run.json` and that turn's `prewalk_runtime.py` output; require the runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` or legacy `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`, and require the observed Builder session id to match the recorded one. Confirm the runtime `--host` value matches the selected adapter. Inspect the cumulative schema_version 2 usage artifact: `turns` must be one aggregate per Builder turn, `calls` must be the raw model-call records, and re-inspecting the same turn must replace rather than duplicate its aggregate. Record per-Builder-turn and per-call usage, cache ratio with its adapter-specific denominator, and cost status and scope as observability only; they are not quality evidence and do not prove a cache benefit. A client-side estimate is not an invoice; a session-cumulative estimate is retained as the latest value, never summed. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
 
 If a progress file exists, read it as navigation context only. A missing or stale progress file is not proof of failure or of a hung process: inspect the background task and raw output before diagnosing, and report the last event time rather than inventing activity. Never treat the final progress event as approval evidence — verify the actual diff.
 
-An `escalated` or `blocked` return is reviewed the same way, with the preserved work and the evidence checked before the request is accepted. If the requested decision is genuinely Navigator's, make it explicitly — or take it to the user when it is a product, scope, or risk decision — and, if work should continue, resume the same recorded Builder session with a `PREWALK_PHASE: DEEPSEEK_RESUME` delta carrying that decision (see Phase A). Do not issue a fresh full handoff unless the user explicitly authorizes cold recovery or the task or boundary materially changed. Only a genuinely different task or boundary starts a new Builder session without calling it recovery. Do not self-redispatch or loop executor dispatches.
+An `escalated` or `blocked` return is reviewed the same way, with the preserved work and the evidence checked before the request is accepted. If the requested decision is genuinely Navigator's, make it explicitly — or take it to the user when it is a product, scope, or risk decision — and, if work should continue, resume the same recorded Builder session with a `PREWALK_PHASE: BUILDER_RESUME` delta (legacy `DEEPSEEK_RESUME` accepted) carrying that decision (see Phase A). Do not issue a fresh full handoff unless the user explicitly authorizes cold recovery or the task or boundary materially changed. Only a genuinely different task or boundary starts a new Builder session without calling it recovery. Do not self-redispatch or loop executor dispatches.
 
 ## Guardrails
 
@@ -219,6 +225,8 @@ An `escalated` or `blocked` return is reviewed the same way, with the preserved 
 - Do not label model-call usage records as Builder turns; keep `calls` and `turns` distinct in the cumulative usage artifact.
 - Do not send keepalive prompts or force compaction merely to chase cache hits; cache is an optimization, not a correctness goal.
 - Do not expose secrets, full environment files, or irrelevant diffs in handoff prompts.
-- Do not put credentials in a handoff, progress file, log, or commit; configure connections only through the host's managed path.
+- Do not put credentials in a handoff, progress file, log, or commit; configure connections only through the adapter's managed path.
 - Do not treat progress events as proof of completion or as a substitute for reviewing the actual diff.
+- Do not invent host commands, flags, session ids, usage, cache hits, or costs; an unavailable capability stays unavailable.
+- Do not claim all harnesses are automatically supported or all adapters live-tested.
 - Do not claim end-to-end completion before Navigator has inspected the returned work and actual diff.

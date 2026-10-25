@@ -36,6 +36,22 @@ CODEX_TOKEN_KEYS = (
     "output_tokens",
     "reasoning_output_tokens",
 )
+CLAUDE_INPUT_KEYS = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+)
+CLAUDE_TOKEN_KEYS = (*CLAUDE_INPUT_KEYS, "output_tokens")
+GENERIC_FAMILY_A_INPUT_KEYS = ("input_other", "cache_read", "cache_creation")
+GENERIC_FAMILY_B_INPUT_KEYS = ("generic_input_tokens", "generic_cached_input_tokens")
+GENERIC_TOKEN_KEYS = (
+    *GENERIC_FAMILY_A_INPUT_KEYS,
+    *GENERIC_FAMILY_B_INPUT_KEYS,
+    "output",
+    "reasoning_output",
+)
+COST_STATUSES = ("reported", "estimated", "unavailable")
+COST_SCOPES = ("call", "session_cumulative")
 COST_KEYS = ("cost", "total_cost", "cost_usd", "total_cost_usd")
 
 
@@ -245,6 +261,71 @@ def _extract_cost(container: dict[str, Any]) -> Any:
     return None
 
 
+def _normalize_call_cost(call: dict[str, Any]) -> None:
+    """Fill cost_status/cost_scope for legacy calls without inventing a cost."""
+    value = _valid_cost(call.get("cost"))
+    if value is None:
+        value = _extract_cost(call)
+    if value is None:
+        call["cost"] = None
+        call["cost_status"] = "unavailable"
+        call["cost_scope"] = None
+        return
+    status = call.get("cost_status")
+    if status not in COST_STATUSES or status == "unavailable":
+        status = "reported"
+    scope = call.get("cost_scope")
+    if scope not in COST_SCOPES:
+        scope = "call"
+    call["cost"] = value
+    call["cost_status"] = status
+    call["cost_scope"] = scope
+
+
+def _summarize_cost(calls: list[dict[str, Any]]) -> tuple[Any, str, str | None]:
+    """Pick the latest cumulative estimate or list per-call values.
+
+    A session-cumulative cost already covers earlier calls in the same session,
+    so resumed turns retain the latest value instead of summing it.
+    """
+    entries = [
+        call
+        for call in calls
+        if call.get("cost") is not None
+        and call.get("cost_status") in ("reported", "estimated")
+    ]
+    cumulative = [
+        call
+        for call in entries
+        if call.get("cost_scope") == "session_cumulative"
+    ]
+    if cumulative:
+        latest = max(
+            cumulative, key=lambda call: (call["builder_turn"], call["call"])
+        )
+        return latest["cost"], latest["cost_status"], "session_cumulative"
+
+    call_scoped = [call for call in entries if call.get("cost_scope") == "call"]
+    if not call_scoped:
+        return None, "unavailable", None
+    if len(call_scoped) == 1:
+        return call_scoped[0]["cost"], call_scoped[0]["cost_status"], "call"
+    values = [
+        {
+            "builder_turn": call["builder_turn"],
+            "call": call["call"],
+            "value": call["cost"],
+        }
+        for call in call_scoped
+    ]
+    status = (
+        "reported"
+        if all(call["cost_status"] == "reported" for call in call_scoped)
+        else "estimated"
+    )
+    return values, status, "call"
+
+
 def _sum_known(
     records: list[dict[str, Any]], keys: Iterable[str]
 ) -> dict[str, int | float]:
@@ -260,6 +341,32 @@ def _sum_known(
     return totals
 
 
+def _token_keys_for(host: str) -> tuple[str, ...]:
+    if host == "kimi":
+        return KIMI_TOKEN_KEYS
+    if host == "codex":
+        return CODEX_TOKEN_KEYS
+    if host == "claude-code":
+        return CLAUDE_TOKEN_KEYS
+    if host == "generic":
+        return GENERIC_TOKEN_KEYS
+    return ()
+
+
+def _generic_family(usage: dict[str, Any]) -> str | None:
+    separate = any(key in usage for key in GENERIC_FAMILY_A_INPUT_KEYS)
+    included = any(key in usage for key in GENERIC_FAMILY_B_INPUT_KEYS)
+    if separate and included:
+        raise InspectError(
+            "generic usage mixes separate-cache and included-total token families"
+        )
+    if included:
+        return "included"
+    if separate:
+        return "separate"
+    return None
+
+
 def _add_input_totals(host: str, totals: dict[str, Any]) -> None:
     if host == "kimi":
         if any(key in totals for key in KIMI_INPUT_KEYS):
@@ -268,7 +375,36 @@ def _add_input_totals(host: str, totals: dict[str, Any]) -> None:
             totals["cache_read_ratio"] = _ratio(
                 totals.get("inputCacheRead"), input_total
             )
-    elif "input_tokens" in totals:
+    elif host == "claude-code":
+        if any(key in totals for key in CLAUDE_INPUT_KEYS):
+            input_total = sum(totals.get(key, 0) for key in CLAUDE_INPUT_KEYS)
+            totals["input_total"] = input_total
+            totals["cache_read_ratio"] = _ratio(
+                totals.get("cache_read_input_tokens"), input_total
+            )
+    elif host == "generic":
+        separate = any(key in totals for key in GENERIC_FAMILY_A_INPUT_KEYS)
+        included = any(key in totals for key in GENERIC_FAMILY_B_INPUT_KEYS)
+        if separate and included:
+            raise InspectError(
+                "generic usage mixes separate-cache and included-total token "
+                "families across calls"
+            )
+        if included:
+            totals["input_total"] = totals.get("generic_input_tokens")
+            totals["cache_read_ratio"] = _ratio(
+                totals.get("generic_cached_input_tokens"),
+                totals.get("generic_input_tokens"),
+            )
+        elif separate:
+            input_total = sum(
+                totals.get(key, 0) for key in GENERIC_FAMILY_A_INPUT_KEYS
+            )
+            totals["input_total"] = input_total
+            totals["cache_read_ratio"] = _ratio(
+                totals.get("cache_read"), input_total
+            )
+    elif host == "codex" and "input_tokens" in totals:
         totals["input_total"] = totals["input_tokens"]
         totals["cache_read_ratio"] = _ratio(
             totals.get("cached_input_tokens"),
@@ -290,8 +426,7 @@ def _aggregate_turn(
     usage_fields = [
         call["usage"] for call in calls if isinstance(call.get("usage"), dict)
     ]
-    token_keys = KIMI_TOKEN_KEYS if host == "kimi" else CODEX_TOKEN_KEYS
-    totals = _sum_known(usage_fields, token_keys)
+    totals = _sum_known(usage_fields, _token_keys_for(host))
     _add_input_totals(host, totals)
     aggregate.update(totals)
     return aggregate
@@ -434,6 +569,24 @@ def _load_prior_usage(
             )
         if "usage" not in call:
             raise InspectError("prior usage calls must include raw usage")
+        status = call.get("cost_status")
+        scope = call.get("cost_scope")
+        if status is not None and status not in COST_STATUSES:
+            raise InspectError(
+                "prior usage calls contain an invalid cost_status"
+            )
+        if scope is not None and scope not in COST_SCOPES:
+            raise InspectError("prior usage calls contain an invalid cost_scope")
+        if status in ("reported", "estimated") and _valid_cost(
+            call.get("cost")
+        ) is None:
+            raise InspectError(
+                "prior usage calls declare a cost status without a valid cost"
+            )
+        if status == "unavailable" and call.get("cost") is not None:
+            raise InspectError(
+                "prior usage calls declare unavailable cost with a cost value"
+            )
         grouped[call_turn].append(call)
     for turn in turns:
         if len(grouped[turn["turn"]]) != turn["call_count"]:
@@ -520,8 +673,7 @@ def _finalize_usage(
     usage_fields = [
         call["usage"] for call in calls_out if isinstance(call.get("usage"), dict)
     ]
-    token_keys = KIMI_TOKEN_KEYS if host == "kimi" else CODEX_TOKEN_KEYS
-    totals = _sum_known(usage_fields, token_keys)
+    totals = _sum_known(usage_fields, _token_keys_for(host))
     _add_input_totals(host, totals)
     totals_out: dict[str, Any] | None = totals or None
 
@@ -552,30 +704,9 @@ def _finalize_usage(
     else:
         usage_status = "unavailable"
 
-    costs: list[dict[str, Any]] = []
     for call in calls_out:
-        value = _valid_cost(call.get("cost"))
-        if value is None:
-            value = _extract_cost(call)
-        call["cost"] = value
-        if value is not None:
-            costs.append(
-                {
-                    "builder_turn": call["builder_turn"],
-                    "call": call["call"],
-                    "value": value,
-                }
-            )
-
-    if not costs:
-        cost_value: Any = None
-        cost_status = "unavailable"
-    elif len(costs) == 1:
-        cost_value = costs[0]["value"]
-        cost_status = "reported"
-    else:
-        cost_value = costs
-        cost_status = "reported"
+        _normalize_call_cost(call)
+    cost_value, cost_status, cost_scope = _summarize_cost(calls_out)
 
     if host == "codex":
         all_source_events = sorted(
@@ -603,15 +734,33 @@ def _finalize_usage(
         "call_count": len(calls_out),
         "turn_count": len(turns_out),
         "skipped_scope_count": total_skipped,
-        "cache_ratio_denominator": (
-            "inputOther+inputCacheRead+inputCacheCreation"
-            if host == "kimi"
-            else "input_tokens"
-        ),
+        "cache_ratio_denominator": _cache_ratio_denominator(host, totals_out),
         "cost": cost_value,
         "cost_status": cost_status,
+        "cost_scope": cost_scope,
         "source": source_out,
     }
+
+
+def _cache_ratio_denominator(
+    host: str, totals: dict[str, Any] | None
+) -> str:
+    if host == "kimi":
+        return "inputOther+inputCacheRead+inputCacheCreation"
+    if host == "codex":
+        return "input_tokens"
+    if host == "claude-code":
+        return (
+            "input_tokens+cache_read_input_tokens+"
+            "cache_creation_input_tokens"
+        )
+    if host == "dsh":
+        return "unavailable"
+    if totals and any(key in totals for key in GENERIC_FAMILY_B_INPUT_KEYS):
+        return "generic_input_tokens"
+    if totals and any(key in totals for key in GENERIC_FAMILY_A_INPUT_KEYS):
+        return "input_other+cache_read+cache_creation"
+    return "unavailable"
 
 
 def _find_kimi_binary() -> str | None:
@@ -942,6 +1091,381 @@ def _codex_usage(
     )
 
 
+def _claude_result(
+    events: list[tuple[int, dict[str, Any]]],
+) -> tuple[str, str, dict[str, Any]]:
+    results = [
+        event for _, event in events if event.get("type") == "result"
+    ]
+    if not results:
+        raise InspectError("Claude Code events contain no terminal result event")
+    result = results[-1]
+
+    candidates: list[str] = []
+    for _, event in events:
+        if event.get("type") == "result":
+            session_id = event.get("session_id")
+            if session_id is not None and not isinstance(session_id, str):
+                raise InspectError(
+                    "Claude Code result session_id must be a string"
+                )
+            if isinstance(session_id, str) and session_id:
+                candidates.append(session_id)
+        elif event.get("type") == "system" and event.get("subtype") == "init":
+            session_id = event.get("session_id")
+            if isinstance(session_id, str) and session_id:
+                candidates.append(session_id)
+    session_id = _single_session_id(candidates, "Claude Code")
+
+    is_error = result.get("is_error")
+    if is_error is not False:
+        detail = result.get("result")
+        if not isinstance(detail, str) or not detail.strip():
+            detail = "no result text"
+        raise InspectError(
+            "Claude Code result is an error "
+            f"(is_error={is_error!r}): {detail}"
+        )
+    text = result.get("result")
+    if not isinstance(text, str) or not text.strip():
+        raise InspectError("Claude Code result contains no final response text")
+    return session_id, text, result
+
+
+def _claude_model(result: dict[str, Any]) -> str | None:
+    model_usage = result.get("modelUsage")
+    if isinstance(model_usage, dict):
+        names = [name for name in model_usage if isinstance(name, str) and name]
+        if len(names) == 1:
+            return names[0]
+    model = result.get("model")
+    return model if isinstance(model, str) and model else None
+
+
+def _claude_usage(
+    session_id: str,
+    result: dict[str, Any],
+    builder_turn: int,
+    prior: PriorUsage | None,
+    events_path: Path,
+) -> dict[str, Any]:
+    raw_usage = result.get("usage")
+    errors: list[str] = []
+    usage: dict[str, int | float] = {}
+
+    if raw_usage is None:
+        pass
+    elif not isinstance(raw_usage, dict):
+        errors.append(
+            "Claude Code result usage is not an object; token usage is unavailable"
+        )
+    else:
+        for key in CLAUDE_TOKEN_KEYS:
+            if key not in raw_usage:
+                continue
+            value = _as_number(raw_usage[key])
+            if value is None or value < 0:
+                errors.append(
+                    f"Claude Code usage field {key} is invalid and was ignored"
+                )
+                continue
+            usage[key] = value
+
+    cost = None
+    cost_status = "unavailable"
+    cost_scope = None
+    raw_cost = result.get("total_cost_usd")
+    if raw_cost is not None:
+        cost = _valid_cost(raw_cost)
+        if cost is None:
+            errors.append(
+                "Claude Code total_cost_usd is invalid and was ignored"
+            )
+        else:
+            cost_status = "estimated"
+            cost_scope = "session_cumulative"
+
+    token_usage_missing = not usage
+    if token_usage_missing and cost is not None:
+        errors.append(
+            "Claude Code result has cost evidence but no token usage; "
+            "token usage is unavailable"
+        )
+
+    current_calls: list[dict[str, Any]] = []
+    if usage or cost is not None:
+        current_calls.append(
+            {
+                "builder_turn": builder_turn,
+                "turn_call": 1,
+                "model": _claude_model(result),
+                "time": None,
+                "time_iso": None,
+                "scope": "turn",
+                "usage": usage,
+                "cache_read_ratio": _ratio(
+                    usage.get("cache_read_input_tokens"),
+                    sum(usage.get(key, 0) for key in CLAUDE_INPUT_KEYS),
+                ),
+                "cost": cost,
+                "cost_status": cost_status,
+                "cost_scope": cost_scope,
+            }
+        )
+
+    return _finalize_usage(
+        "claude-code",
+        session_id,
+        builder_turn,
+        prior,
+        current_calls,
+        [str(events_path)],
+        not current_calls,
+        0,
+        None,
+        extra_errors=errors,
+        missing_message=f"no Claude Code usage for builder turn {builder_turn}",
+    )
+
+
+def _dsh_final_text(final: dict[str, Any]) -> str:
+    for key in ("text", "answer", "result", "content"):
+        value = final.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+        if isinstance(value, dict):
+            inner = value.get("text")
+            if isinstance(inner, str) and inner.strip():
+                return inner
+            inner = _assistant_text(value.get("content"))
+            if inner is not None and inner.strip():
+                return inner
+        if isinstance(value, list):
+            inner = _assistant_text(value)
+            if inner is not None and inner.strip():
+                return inner
+    message = final.get("message")
+    if isinstance(message, str) and message.strip():
+        return message
+    if isinstance(message, dict):
+        inner = message.get("text")
+        if isinstance(inner, str) and inner.strip():
+            return inner
+        inner = _assistant_text(message.get("content"))
+        if inner is not None and inner.strip():
+            return inner
+    if isinstance(message, list):
+        inner = _assistant_text(message)
+        if inner is not None and inner.strip():
+            return inner
+    raise InspectError("DSH final event contains no final assistant text")
+
+
+def _dsh_result(
+    events: list[tuple[int, dict[str, Any]]],
+) -> tuple[str, str]:
+    finals = [event for _, event in events if event.get("type") == "final"]
+    if not finals:
+        raise InspectError("DSH events contain no terminal final event")
+    final = finals[-1]
+
+    candidates: list[str] = []
+    for _, event in events:
+        if event.get("type") not in ("session", "final"):
+            continue
+        if "sessionId" not in event:
+            if event.get("type") == "session":
+                raise InspectError("DSH session event has no sessionId")
+            continue
+        session_id = event.get("sessionId")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise InspectError("DSH sessionId must be a non-empty string")
+        candidates.append(session_id)
+    session_id = _single_session_id(candidates, "DSH")
+
+    reason = final.get("reason")
+    if not isinstance(reason, dict):
+        raise InspectError("DSH final event has no durable reason object")
+    kind = reason.get("kind")
+    if kind != "completed":
+        raise InspectError(
+            f"DSH final reason.kind is {kind!r}, not 'completed'"
+        )
+    return session_id, _dsh_final_text(final)
+
+
+def _dsh_usage(
+    session_id: str,
+    builder_turn: int,
+    prior: PriorUsage | None,
+    events_path: Path,
+) -> dict[str, Any]:
+    return _finalize_usage(
+        "dsh",
+        session_id,
+        builder_turn,
+        prior,
+        [],
+        [str(events_path)],
+        False,
+        0,
+        None,
+        extra_errors=[
+            "DSH exposes no documented token or cost payload; usage and cost "
+            "are unavailable"
+        ],
+    )
+
+
+def _generic_session_and_final(
+    events: list[tuple[int, dict[str, Any]]],
+) -> tuple[str, str]:
+    finals = [event for _, event in events if event.get("type") == "final"]
+    if not finals:
+        raise InspectError("generic events contain no terminal final event")
+    final = finals[-1]
+
+    candidates: list[str] = []
+    for _, event in events:
+        if event.get("type") not in ("session", "final"):
+            continue
+        if "session_id" not in event:
+            if event.get("type") == "session":
+                raise InspectError("generic session event has no session_id")
+            continue
+        session_id = event.get("session_id")
+        if not isinstance(session_id, str) or not session_id.strip():
+            raise InspectError(
+                "generic session_id must be a non-empty string"
+            )
+        candidates.append(session_id)
+    session_id = _single_session_id(candidates, "generic")
+
+    completed = final.get("completed")
+    if completed is not True:
+        raise InspectError("generic final.completed must be true")
+    text = final.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise InspectError("generic final event contains no final text")
+    return session_id, text
+
+
+def _generic_cost(
+    event: dict[str, Any]
+) -> tuple[Any, str, str | None]:
+    status = event.get("cost_status")
+    scope = event.get("cost_scope")
+    if scope is not None and scope not in COST_SCOPES:
+        raise InspectError(
+            "generic cost_scope must be 'call' or 'session_cumulative'"
+        )
+    if status is None:
+        if event.get("cost") is None:
+            return None, "unavailable", None
+        raise InspectError("generic cost requires cost_status")
+    if status not in COST_STATUSES:
+        raise InspectError(
+            "generic cost_status must be reported, estimated, or unavailable"
+        )
+    value = _valid_cost(event.get("cost"))
+    if status == "unavailable":
+        if value is not None:
+            raise InspectError(
+                "generic cost_status unavailable requires a null cost"
+            )
+        return None, "unavailable", None
+    if value is None:
+        raise InspectError(
+            f"generic cost_status {status} requires a valid cost"
+        )
+    return value, status, scope or "call"
+
+
+def _generic_call_ratio(
+    usage: dict[str, Any], family: str
+) -> float | None:
+    if family == "included":
+        return _ratio(
+            usage.get("generic_cached_input_tokens"),
+            usage.get("generic_input_tokens"),
+        )
+    return _ratio(
+        usage.get("cache_read"),
+        sum(usage.get(key, 0) for key in GENERIC_FAMILY_A_INPUT_KEYS),
+    )
+
+
+def _generic_usage(
+    session_id: str,
+    events: list[tuple[int, dict[str, Any]]],
+    builder_turn: int,
+    prior: PriorUsage | None,
+    events_path: Path,
+) -> dict[str, Any]:
+    usage_events = [
+        event for _, event in events if event.get("type") == "usage"
+    ]
+    current_calls: list[dict[str, Any]] = []
+    for index, event in enumerate(usage_events, 1):
+        scope = event.get("scope")
+        if scope is not None and scope != "turn":
+            raise InspectError(
+                "generic usage scope must be absent or 'turn'"
+            )
+        raw_usage = event.get("usage")
+        if not isinstance(raw_usage, dict):
+            raise InspectError("generic usage event requires a usage object")
+        family = _generic_family(raw_usage)
+        if family is None:
+            raise InspectError(
+                "generic usage event contains no recognized token fields"
+            )
+        usage: dict[str, int | float] = {}
+        for key in GENERIC_TOKEN_KEYS:
+            if key not in raw_usage:
+                continue
+            value = _as_number(raw_usage[key])
+            if value is None or value < 0:
+                raise InspectError(
+                    f"generic usage field {key} must be a non-negative number"
+                )
+            usage[key] = value
+        if family == "included" and "generic_input_tokens" not in usage:
+            raise InspectError(
+                "generic included-total usage requires generic_input_tokens"
+            )
+        cost, cost_status, cost_scope = _generic_cost(event)
+        model = event.get("model")
+        current_calls.append(
+            {
+                "builder_turn": builder_turn,
+                "turn_call": index,
+                "model": model if isinstance(model, str) else None,
+                "time": event.get("time"),
+                "time_iso": _iso_from_millis(event.get("time")),
+                "scope": scope or "turn",
+                "usage": usage,
+                "cache_read_ratio": _generic_call_ratio(usage, family),
+                "cost": cost,
+                "cost_status": cost_status,
+                "cost_scope": cost_scope,
+            }
+        )
+    current_missing = not current_calls
+    return _finalize_usage(
+        "generic",
+        session_id,
+        builder_turn,
+        prior,
+        current_calls,
+        [str(events_path)],
+        current_missing,
+        0,
+        None,
+        missing_message=f"no generic usage events for builder turn {builder_turn}",
+    )
+
+
 def inspect(
     host: str,
     events_path: Path,
@@ -989,6 +1513,45 @@ def inspect(
             prior,
             events_path,
         )
+    elif host == "claude-code":
+        session_id, final_message, result = _claude_result(events)
+        if expected_session is not None and session_id != expected_session:
+            raise InspectError(
+                "Builder session mismatch: expected "
+                f"{expected_session} but events report {session_id}"
+            )
+        prior = _load_prior_usage(usage_path, host, session_id, builder_turn)
+        usage = _claude_usage(
+            session_id,
+            result,
+            builder_turn,
+            prior,
+            events_path,
+        )
+    elif host == "dsh":
+        session_id, final_message = _dsh_result(events)
+        if expected_session is not None and session_id != expected_session:
+            raise InspectError(
+                "Builder session mismatch: expected "
+                f"{expected_session} but events report {session_id}"
+            )
+        prior = _load_prior_usage(usage_path, host, session_id, builder_turn)
+        usage = _dsh_usage(session_id, builder_turn, prior, events_path)
+    elif host == "generic":
+        session_id, final_message = _generic_session_and_final(events)
+        if expected_session is not None and session_id != expected_session:
+            raise InspectError(
+                "Builder session mismatch: expected "
+                f"{expected_session} but events report {session_id}"
+            )
+        prior = _load_prior_usage(usage_path, host, session_id, builder_turn)
+        usage = _generic_usage(
+            session_id,
+            events,
+            builder_turn,
+            prior,
+            events_path,
+        )
     else:
         raise InspectError(f"unsupported host: {host}")
 
@@ -1006,7 +1569,9 @@ def inspect(
         "usage_call_count": usage["call_count"],
         "skipped_scope_count": usage["skipped_scope_count"],
         "cache_read_ratio": (usage["totals"] or {}).get("cache_read_ratio"),
+        "cache_ratio_denominator": usage["cache_ratio_denominator"],
         "cost_status": usage["cost_status"],
+        "cost_scope": usage.get("cost_scope"),
         "events": str(events_path),
         "final_message": str(final_message_path),
         "usage": str(usage_path),
@@ -1034,7 +1599,11 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser(
         "inspect", help="extract session, final message and cumulative usage"
     )
-    inspect_parser.add_argument("--host", required=True, choices=("kimi", "codex"))
+    inspect_parser.add_argument(
+        "--host",
+        required=True,
+        choices=("kimi", "codex", "claude-code", "dsh", "generic"),
+    )
     inspect_parser.add_argument("--builder-turn", required=True, type=_positive_int)
     inspect_parser.add_argument("--events", required=True, type=Path)
     inspect_parser.add_argument("--expected-session")
