@@ -10,7 +10,7 @@
     {
       "id": 2,
       "prompt": "检查一下我的 DeepSeek 子 Agent 为什么没有生效。",
-      "expected_output": "先调用 status，再按结构化状态调用 test 或 repair；不使用 PATH 中的独立 CLI。验收以受管 codex exec 执行面按 NATIVE_DEEPSEEK_OK 口令返回为准（deepseek provider、deepseek-flash、max）。",
+      "expected_output": "先调用 status，再按结构化状态调用 test 或 repair；不使用 PATH 中的独立 CLI。验收以受管 codex exec 执行面按 NATIVE_DEEPSEEK_OK 口令返回为准（deepseek provider、deepseek-flash、medium）。",
       "files": []
     },
     {
@@ -28,7 +28,7 @@
     {
       "id": 5,
       "prompt": "当前 spawn_agent 工具里看不到 DeepSeek，帮我先用脚本或 codex exec 做完这个编码任务。",
-      "expected_output": "说明桌面 CLI ≥0.146 把 collab/spawn_agent 限定在 ChatGPT 后端，原生派发不可用；日常 DeepSeek 执行段按约定走受管 codex exec 执行面（deepseek provider、deepseek-flash、max），不为此重启或新建任务。",
+      "expected_output": "说明桌面 CLI ≥0.146 把 collab/spawn_agent 限定在 ChatGPT 后端，原生派发不可用；日常 DeepSeek 执行段按约定走受管 codex exec 执行面（deepseek provider、deepseek-flash、medium），不为此重启或新建任务。",
       "files": []
     },
     {
@@ -40,19 +40,19 @@
     {
       "id": 7,
       "prompt": "配置成功后，日常代码审查应该怎么调用？",
-      "expected_output": "主 Agent 通过受管执行面派发：codex exec 子进程，model=deepseek-flash、model_provider=deepseek、model_reasoning_effort=max；不重复运行 setup、test 等管理命令。",
+      "expected_output": "主 Agent 通过受管执行面派发：codex exec 子进程，model=deepseek-flash、model_provider=deepseek、model_reasoning_effort=medium；不重复运行 setup、test 等管理命令。",
       "files": []
     },
     {
       "id": 8,
       "prompt": "Windows Store 里的 Codex 被复制出来后能跑父模型，但验收提示 code-mode host executable is missing，怎么修？",
-      "expected_output": "不要使用单文件副本或 PATH 独立 CLI。运行 repair 或 test，让管理程序把桌面版 codex.exe 和 codex-code-mode-host.exe 一起缓存，再按 deepseek-flash、max 执行口令验收。",
+      "expected_output": "不要使用单文件副本或 PATH 独立 CLI。运行 repair 或 test，让管理程序把桌面版 codex.exe 和 codex-code-mode-host.exe 一起缓存，再按 deepseek-flash、medium 执行口令验收。",
       "files": []
     },
     {
       "id": 9,
       "prompt": "DeepSeek 验收返回 NATIVE_DEEPSEEK_OK.，为什么失败？",
-      "expected_output": "仅规范化口令末尾的中英文标点；仍严格核对执行面 Provider、模型和 max 思考程度，其他文本差异仍失败。",
+      "expected_output": "仅规范化口令末尾的中英文标点；仍严格核对执行面 Provider、模型和已配置思考程度（默认 medium），其他文本差异仍失败。",
       "files": []
     }
   ]

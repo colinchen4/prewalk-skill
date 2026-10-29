@@ -2329,3 +2329,36 @@ class NewHostCliTests(RuntimeTestBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReturnPackageTests(RuntimeTestBase):
+    def _inspect(self, final: str, handoff_id: str | None):
+        write_jsonl(self.events, generic_events(final=final))
+        return RUNTIME.inspect(
+            host="generic",
+            events_path=self.events,
+            final_message_path=self.final,
+            usage_path=self.usage,
+            builder_turn=1,
+            handoff_id=handoff_id,
+        )
+
+    def test_without_flag_legacy_behaviour_is_unchanged(self):
+        self.assertTrue(self._inspect("no package", None)["ok"])
+
+    def test_matching_package_is_accepted(self):
+        final = "done\nPREWALK_PHASE: NAVIGATOR_REVIEW\nHANDOFF_ID: h-1\n"
+        self.assertTrue(self._inspect(final, "h-1")["ok"])
+
+    def test_legacy_marker_is_accepted(self):
+        final = "PREWALK_PHASE: SOL_REVIEW\nHANDOFF_ID: h-1"
+        self.assertTrue(self._inspect(final, "h-1")["ok"])
+
+    def test_missing_marker_is_rejected_without_writing_usage(self):
+        with self.assertRaises(RUNTIME.InspectError):
+            self._inspect("HANDOFF_ID: h-1", "h-1")
+        self.assertFalse(self.usage.exists())
+
+    def test_wrong_handoff_id_is_rejected(self):
+        with self.assertRaises(RUNTIME.InspectError):
+            self._inspect("PREWALK_PHASE: NAVIGATOR_REVIEW\nHANDOFF_ID: other", "h-1")

@@ -1,4 +1,4 @@
 interface:
   display_name: "Codex DeepSeek Subagent"
-  short_description: "配置并验证 max 推理的 Codex 原生 DeepSeek 子 Agent"
-  default_prompt: "使用 $codex-deepseek-subagent 配置并验证 max 推理的 DeepSeek 原生子 Agent。"
+  short_description: "配置并验证默认 medium 推理的 Codex 原生 DeepSeek 子 Agent"
+  default_prompt: "使用 $codex-deepseek-subagent 配置并验证默认 medium 推理的 DeepSeek 原生子 Agent。"
