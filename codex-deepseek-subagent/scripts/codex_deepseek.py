@@ -39,7 +39,10 @@ MODEL = "deepseek-flash"
 LEGACY_MODEL_PREFIX = "deepseek-v4-flash"
 PROVIDER = "deepseek"
 ROLE = "DeepSeek"
-EFFORT = "max"
+DEFAULT_EFFORT = "medium"
+ALLOWED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
+EFFORT_ENV = "CODEX_DEEPSEEK_EFFORT"
+EFFORT = DEFAULT_EFFORT
 DEFAULT_BASE_URL = "https://api.deepseek.com/"
 LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
 PARENT_MULTI_AGENT_VERSION = "v1"
@@ -108,6 +111,35 @@ def emit(payload: dict[str, Any], as_json: bool) -> None:
     for key, value in payload.items():
         if key != "status":
             print(f"{key}: {value}")
+
+
+
+def normalize_effort(value: str) -> str:
+    cleaned = (value or "").strip().lower()
+    if cleaned not in ALLOWED_EFFORTS:
+        allowed = ", ".join(sorted(ALLOWED_EFFORTS))
+        raise ManagerError(
+            "invalid_effort",
+            f"不支持的思考程度: {value!r}。可选: {allowed}。",
+        )
+    return cleaned
+
+
+def resolve_effort(explicit: str | None = None) -> str:
+    """Resolve Builder effort: explicit CLI value, else env, else default medium."""
+    if explicit is not None and str(explicit).strip() != "":
+        return normalize_effort(str(explicit))
+    env_value = os.environ.get(EFFORT_ENV)
+    if env_value is not None and str(env_value).strip() != "":
+        return normalize_effort(str(env_value))
+    return DEFAULT_EFFORT
+
+
+def apply_effort(explicit: str | None = None) -> str:
+    """Set module-level EFFORT used by agent text, acceptance, and launch flags."""
+    global EFFORT
+    EFFORT = resolve_effort(explicit)
+    return EFFORT
 
 
 def sha256_bytes(data: bytes) -> str:
@@ -1111,7 +1143,7 @@ def static_status(paths: Paths, codex_bin: str | None = None) -> dict[str, Any]:
         "desktop_codex_detected",
     )
     ready = all(checks.get(key) is True for key in required)
-    return result("configured" if ready else "partial", checks=checks, errors=errors)
+    return result("configured" if ready else "partial", checks=checks, errors=errors, reasoning_effort=EFFORT, model=MODEL)
 
 
 def direct_test(paths: Paths, codex_bin: str) -> dict[str, Any]:
@@ -1226,7 +1258,7 @@ def normalize_native_verification_message(message: str | None) -> str | None:
 def native_test(paths: Paths, codex_bin: str) -> dict[str, Any]:
     # 桌面 CLI ≥0.146 把 collab/spawn_agent 限定在 ChatGPT 后端，原生 spawn 无法把子线程
     # 路由到自定义 provider（openai/codex#31882、#36957）。执行段改用受管 codex exec 进程，
-    # 这里验收该执行面：桌面运行时 + deepseek provider + max 推理能按口令返回。
+    # 这里验收该执行面：桌面运行时 + deepseek provider + 已配置思考程度（默认 medium）能按口令返回。
     env = codex_child_env(paths)
     prompt = "You are the managed DeepSeek executor surface. Reply exactly NATIVE_DEEPSEEK_OK and nothing else."
     proc = subprocess.run(
@@ -1547,11 +1579,19 @@ def main() -> int:
     parser.add_argument("command", choices=("status", "setup", "test", "repair", "disable", "uninstall"))
     parser.add_argument("--codex-home")
     parser.add_argument("--base-url", help="OpenAI 兼容 Base URL；省略时保留既有合法值或使用默认地址。")
+    parser.add_argument(
+        "--effort",
+        help=(
+            f"Builder 思考程度（默认 {DEFAULT_EFFORT}；"
+            f"也可用环境变量 {EFFORT_ENV}）。Prewalk 不推荐 Builder 使用 max。"
+        ),
+    )
     parser.add_argument("--api-key-stdin", action="store_true")
     parser.add_argument("--skip-live-test", action="store_true")
     parser.add_argument("--remove-credential", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
+    apply_effort(args.effort)
     paths = resolve_paths(args.codex_home)
     try:
         explicit_base_url = (

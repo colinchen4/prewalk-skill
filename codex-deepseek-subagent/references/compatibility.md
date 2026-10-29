@@ -8,7 +8,7 @@
 - ChatGPT/Codex 桌面应用至少启动过一次
 - DeepSeek 官方 Responses API
 - `deepseek-flash`
-- 思考程度 `max`
+- 思考程度默认 `medium`（可用 `--effort` / `CODEX_DEEPSEEK_EFFORT` 配置；Prewalk 不推荐 Builder `max`）
 
 ## 配置位置
 
@@ -34,7 +34,7 @@
 
 ```text
 codex exec --skip-git-repo-check -s workspace-write -C "<workspace>" \
-  -m deepseek-flash -c model_provider="deepseek" -c model_reasoning_effort="max" - < "<handoff-package>"
+  -m deepseek-flash -c model_provider="deepseek" -c model_reasoning_effort="medium" - < "<handoff-package>"
 ```
 
 该形态在 0.144–0.154 均可用：它只依赖顶层 `model_provider` 覆盖，不经过 collab 命名空间。派发方（如 prewalk skill）从 `status` 获取缓存运行时路径并显式设置 `CODEX_HOME`。

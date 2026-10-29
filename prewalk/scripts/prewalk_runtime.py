@@ -17,6 +17,7 @@ import datetime as _datetime
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1474,6 +1475,7 @@ def inspect(
     builder_turn: int,
     expected_session: str | None = None,
     cwd: Path | None = None,
+    handoff_id: str | None = None,
 ) -> dict[str, Any]:
     if builder_turn < 1:
         raise InspectError("--builder-turn must be a positive integer")
@@ -1556,6 +1558,8 @@ def inspect(
         raise InspectError(f"unsupported host: {host}")
 
     _atomic_write_text(final_message_path, final_message)
+    if handoff_id is not None:
+        _check_return_package(final_message, handoff_id)
     _atomic_write_json(usage_path, usage)
 
     summary: dict[str, Any] = {
@@ -1579,6 +1583,25 @@ def inspect(
     if usage.get("usage_error"):
         summary["usage_error"] = usage["usage_error"]
     return summary
+
+
+_REVIEW_MARKERS = (
+    "PREWALK_PHASE: NAVIGATOR_REVIEW",
+    "PREWALK_PHASE: SOL_REVIEW",
+)
+
+
+def _check_return_package(final_message: str, handoff_id: str) -> None:
+    """Reject a final message that is not a Builder-to-Navigator package."""
+    if not any(marker in final_message for marker in _REVIEW_MARKERS):
+        raise InspectError(
+            "final message lacks PREWALK_PHASE: NAVIGATOR_REVIEW return package"
+        )
+    ids = re.findall(r"^\s*HANDOFF_ID:\s*(\S+)\s*$", final_message, re.M)
+    if handoff_id not in ids:
+        raise InspectError(
+            f"final message HANDOFF_ID mismatch: expected {handoff_id}, found {ids or 'none'}"
+        )
 
 
 def _positive_int(value: str) -> int:
@@ -1615,6 +1638,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="cumulative usage artifact; for --builder-turn >1 this file is prior state",
     )
     inspect_parser.add_argument("--cwd", type=Path)
+    inspect_parser.add_argument(
+        "--handoff-id",
+        help="require the final message to be a NAVIGATOR_REVIEW package with this HANDOFF_ID",
+    )
     return parser
 
 
@@ -1629,6 +1656,7 @@ def main(argv: list[str] | None = None) -> int:
             builder_turn=args.builder_turn,
             expected_session=args.expected_session,
             cwd=args.cwd,
+            handoff_id=args.handoff_id,
         )
     except (InspectError, OSError) as exc:
         print(

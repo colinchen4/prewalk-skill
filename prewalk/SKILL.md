@@ -52,20 +52,27 @@ Apply changes only through the adapter's documented managed configuration path. 
 
 For an orchestrated Navigator run, ask the user to confirm the model pairing before **Orient**. Use the host's ordinary question mechanism; structured questions are optional, and plain text is sufficient. Reuse values already supplied in the invocation and ask only for missing values. Do not ask again during executor execution, review, or resume from a phase marker.
 
-Ask these four questions together:
+**Recommended defaults (Prewalk):** Navigator effort `high` (use `max` only when digging hard into an unclear root cause); Builder effort `medium`. Navigator decides; Builder follows the first-edit template — do not default Builder to `max`, because max mostly re-plans work that is already decided and burns tokens. Pure pattern expansion may use Builder `low`; repeated compile/test failures may raise Builder to `high`; escalate back to Navigator instead of jumping to Builder `max`.
+
+Before asking, load the last confirmed pairing with `python3 <skill-dir>/scripts/prewalk_prefs.py show --json` (file: `~/.prewalk/last-pairing.json`, overridable by `PREWALK_PREFS_PATH`). If a last pairing exists, offer **reuse last: &lt;navigator model/effort → builder model/effort&gt;** as the first option. If the user accepts reuse or **use defaults**, skip the four questions.
+
+Otherwise ask these four questions together, stating the recommended defaults in the prompt:
 
 1. Which model should Navigator use? Default: the current parent model.
-2. Which thinking effort should Navigator use? Default: that model's configured effort.
+2. Which thinking effort should Navigator use? Recommended default: `high`.
 3. Which model should the Builder executor use? Default: the selected adapter's managed executor model.
-4. Which thinking effort should the Builder executor use? Default: that executor model's configured effort.
+4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`).
 
-Accept **use defaults** as the answer to all four. If the host cannot ask questions, use the current managed defaults and report them; do not block an unattended run merely because the prompt is unavailable.
+Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator high decides; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.
+
+After the user confirms a pairing, persist it with `python3 <skill-dir>/scripts/prewalk_prefs.py save ...` (non-secret fields only: models and efforts). Next orchestrated run should offer that pairing for reuse.
 
 A selection is not proof that it took effect. Before any implementation edit or dispatch, validate the requested values and record both requested and effective models and efforts in the handoff:
 
 - Each effort must be supported by its selected model; never silently substitute a different value.
 - If the requested Navigator model or effort is not the effective parent-session value, pause and ask the user to apply it through the host's native model/configuration mechanism, then rerun Prewalk. Do not claim that answering the prompt switched the parent session.
 - If the requested Builder model or effort is unavailable through the selected adapter's managed surface, pause before dispatch. Do not hand-edit credentials or configuration, bypass the managed surface, or dispatch a different model while reporting the requested one. The user must choose the surface's actual pairing or switch to an adapter/surface that provides the requested model. Do not imply that arbitrary setup makes every model valid.
+- For the Codex DeepSeek managed surface, the manager default Builder effort is `medium` (`--effort` / `CODEX_DEEPSEEK_EFFORT`); pass the validated Builder effort into the launch command rather than assuming `max`.
 - Once validated, carry the effective values unchanged through execution, return, and review. A legacy handoff without these fields uses the values visible in its actual launch and parent session; do not re-ask.
 
 ## Shared rules
@@ -157,6 +164,10 @@ Report the run directory, the background task id when the launch provides one, a
 
 After the executor process finishes, require its runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted) and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the adapter's documented repair/diagnostic step. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
 
+### Optional async mode
+
+Serial blocking dispatch above is the default. Only when the user asks for it, or Navigator has independent work while Builder runs, follow [async-mode.md](references/async-mode.md) instead: launch with a short brief through `scripts/prewalk_async.py`, keep working, read only the new progress tail with `status --after`, redirect with `steer`, stop with `cancel`. Final review rules are unchanged.
+
 ### Resume the Builder session
 
 When continuing the same task and boundary — a supplement, an escalation decision, or rework — do not start another Builder session. Read [session-continuity.md](references/session-continuity.md), load `run.json`, and send only a `PREWALK_PHASE: BUILDER_RESUME` delta from [handoff-format.md](references/handoff-format.md). Legacy `PREWALK_PHASE: DEEPSEEK_RESUME` deltas are accepted for existing sessions. The delta repeats the unchanged `HANDOFF_ID` and expected Builder session id and carries only the new decision, new evidence or constraints, current TODO state, progress path, and the normal `NAVIGATOR_REVIEW` return requirement. Do not resend the original objective, repository inventory, old evidence, first edit, or full handoff.
@@ -198,7 +209,7 @@ Include the original objective, inherited first edit, complete changed-path inve
 
 ## Phase C: Navigator review
 
-Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. Review for:
+Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. In async mode with git layers, start from the run dir's `review.md` (built from `refs/prewalk/<id>/*`, not the Builder's report): its timeline, flags (`empty_after_L1`, `out_of_scope`, `template_edited`, `claim_mismatch`) and Builder diff L1..final; see [async-mode.md](references/async-mode.md). Review for:
 
 - Requirement coverage and behavioral correctness
 - Root-cause alignment and architectural consistency

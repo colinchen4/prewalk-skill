@@ -20,9 +20,12 @@ SPEC.loader.exec_module(MANAGER)
 
 
 class DeepSeekManagerTests(unittest.TestCase):
-    def test_agent_defaults_to_max_reasoning(self):
-        self.assertEqual(MANAGER.EFFORT, "max")
-        self.assertIn('model_reasoning_effort = "max"', MANAGER.expected_agent_text())
+    def test_agent_defaults_to_medium_reasoning(self):
+        self.assertEqual(MANAGER.DEFAULT_EFFORT, "medium")
+        self.assertEqual(MANAGER.resolve_effort(), "medium")
+        MANAGER.apply_effort(None)
+        self.assertEqual(MANAGER.EFFORT, "medium")
+        self.assertIn('model_reasoning_effort = "medium"', MANAGER.expected_agent_text())
 
     def test_codex_child_env_removes_codex_api_key_case_insensitively(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -120,7 +123,7 @@ class DeepSeekManagerTests(unittest.TestCase):
         self.assertEqual(result["executor_surface"], "codex_exec")
         self.assertEqual(result["model_provider"], "deepseek")
         self.assertEqual(result["model"], "deepseek-flash")
-        self.assertEqual(result["reasoning_effort"], "max")
+        self.assertEqual(result["reasoning_effort"], "medium")
         self.assertEqual(result["agent_role"], "DeepSeek")
 
     def test_native_test_rejects_missing_pass_phrase(self):
@@ -258,6 +261,54 @@ class DeepSeekManagerTests(unittest.TestCase):
                 MANAGER.DEFAULT_BASE_URL,
             )
         self.assertTrue(compatible, issues)
+
+
+    def test_effort_cli_and_env_override(self):
+        MANAGER.apply_effort("high")
+        self.assertEqual(MANAGER.EFFORT, "high")
+        self.assertIn('model_reasoning_effort = "high"', MANAGER.expected_agent_text())
+        with mock.patch.dict(os.environ, {MANAGER.EFFORT_ENV: "low"}, clear=False):
+            self.assertEqual(MANAGER.resolve_effort(), "low")
+            MANAGER.apply_effort(None)
+            self.assertEqual(MANAGER.EFFORT, "low")
+        # explicit wins over env
+        with mock.patch.dict(os.environ, {MANAGER.EFFORT_ENV: "low"}, clear=False):
+            self.assertEqual(MANAGER.resolve_effort("max"), "max")
+        MANAGER.apply_effort(None)  # restore default for later tests
+        self.assertEqual(MANAGER.EFFORT, "medium")
+
+    def test_invalid_effort_rejected(self):
+        with self.assertRaises(MANAGER.ManagerError) as ctx:
+            MANAGER.normalize_effort("ultra")
+        self.assertEqual(ctx.exception.code, "invalid_effort")
+
+    def test_native_test_reports_configured_effort(self):
+        completed = SimpleNamespace(
+            returncode=0,
+            stdout='{"type":"turn.completed"}\nagent message: NATIVE_DEEPSEEK_OK\n',
+            stderr="",
+        )
+        MANAGER.apply_effort("high")
+        try:
+            with tempfile.TemporaryDirectory() as temp_dir:
+                paths = MANAGER.resolve_paths(temp_dir)
+                with mock.patch.object(MANAGER.subprocess, "run", return_value=completed) as run:
+                    result = MANAGER.native_test(paths, "codex.exe")
+            self.assertEqual(result["reasoning_effort"], "high")
+            command = run.call_args.args[0]
+            self.assertIn('model_reasoning_effort="high"', command)
+        finally:
+            MANAGER.apply_effort(None)
+
+    def test_skill_docs_recommend_medium_not_max_default(self):
+        root = Path(__file__).parents[1]
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        compat = (root / "references" / "compatibility.md").read_text(encoding="utf-8")
+        self.assertIn("默认 `medium`", skill)
+        self.assertNotIn('model_reasoning_effort="max"', skill)
+        self.assertIn("默认 `medium`", compat)
+        self.assertIn('model_reasoning_effort="medium"', compat)
+
 
 
 if __name__ == "__main__":
