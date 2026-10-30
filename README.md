@@ -68,7 +68,7 @@ Ask in plain language, for example:
 [$prewalk] 把这三个批改问题修掉，测试由默认模型进行
 ```
 
-Navigator runs the prewalk, lands one edit, selects an adapter, dispatches the handoff package to the Builder executor process, waits, then reviews the real worktree diff before reporting.
+Navigator classifies and plans before any Builder starts, writes L1 only for `sample_guided`, then launches one persistent Builder in an isolated Git worktree. The same PID/session handles scoped checks, implementation, and validation without a cold start. Navigator approves only actual diff and validation evidence; no Builder prose or automatic merge is required. The full protocol is in [`prewalk/references/builder-fusion.md`](prewalk/references/builder-fusion.md).
 
 ### First use
 

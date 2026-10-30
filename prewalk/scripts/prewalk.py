@@ -59,7 +59,7 @@ def available_models(navigator_host: str | None = None) -> dict[str, Any]:
         models = list(dict.fromkeys(m for m in [row["weak_model"], *row["alt_models"]] if m))
         backends.append({"backend": row["id"], "models": models,
                          "default_model": row["weak_model"], "default_effort": row["weak_effort"],
-                         "efforts": row["efforts"]})
+                         "efforts": row["efforts"], "persistent": backend.persistent})
     return {"ok": True, "navigator_host": host, "navigator_host_source": host_source,
             "backends": backends}
 
@@ -266,7 +266,8 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 for row in report["backends"]:
                     effort = row["default_effort"] or "(not settable)"
-                    print(f"{row['backend']}: models={', '.join(row['models'])}; "
+                    mode = "persistent" if row["persistent"] else "legacy"
+                    print(f"{row['backend']} ({mode}): models={', '.join(row['models'])}; "
                           f"default={row['default_model']}/{effort}; "
                           f"efforts={', '.join(row['efforts']) or '(not settable)'}")
                 if not report["backends"]:

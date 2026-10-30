@@ -53,12 +53,14 @@ class ModelsTests(CliCase):
         kimi = next(row for row in report["backends"] if row["backend"] == "kimi-sub")
         self.assertEqual(kimi["models"], ["kimi-code/kimi-for-coding", "kimi-code/k3-256k"])
         self.assertEqual(kimi["default_model"], "kimi-code/kimi-for-coding")
-        self.assertIsNone(kimi["default_effort"])
+        self.assertEqual(kimi["default_effort"], "low")
+        self.assertEqual(kimi["efforts"], ["low", "high", "max"])
+        self.assertTrue(kimi["persistent"])
 
     def test_models_text_output(self):
         code, out, _ = self.cli("models", "--navigator-host", "claude-code")
         self.assertEqual(code, 0)
-        self.assertIn("claude-code-sub: models=sonnet, haiku", out)
+        self.assertIn("claude-code-sub (legacy): models=sonnet, haiku", out)
         self.assertIn("default=sonnet/medium", out)
 
 

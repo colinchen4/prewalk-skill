@@ -135,29 +135,38 @@ Create a TODO list using the task's plan or TODO mechanism:
 - Keep focused and broader regression verification as explicit items when appropriate.
 - Make the first implementation item the smallest coherent slice that demonstrates the intended pattern.
 
-### Land the first credible edit
+### Classify and write the plan before starting Builder
 
-Make exactly one coherent implementation edit. It may include inseparable adjacent hunks or files, but must represent one atomic slice. Inspect its diff. Run only a fast syntax, compile, or focused check when needed to prove the edit is not malformed. Do not debug onward or start the second implementation step in Navigator.
+Do not start any Builder process for exploration. Classify after Navigator has enough deterministic evidence:
+
+- `brief_only`: mechanical remaining work with verification; no Navigator code edit.
+- `sample_guided`: exactly one coherent difficult slice needs a Navigator L1 sample; extend it with Builder.
+- `navigator_only`: judgment dominates or verification is unavailable; finish directly without Builder.
+
+Read [builder-fusion.md](references/builder-fusion.md) and write `plan.json` with `prewalk_plan.py create`, including goal, scope, acceptance, and independent validation commands. `navigator_only` needs no Builder plan or launch. For `sample_guided`, capture L0 before editing, land exactly one coherent L1 sample, inspect its complete diff, and retain `first-edit.patch`. Do not debug onward or start a second implementation step in Navigator.
 
 ### Dispatch at the Builder boundary
 
-Read [handoff-format.md](references/handoff-format.md), [progress-format.md](references/progress-format.md), [session-continuity.md](references/session-continuity.md), [adapters/README.md](adapters/README.md), and the selected `adapters/<host>.md`, then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
-
-Allocate one run directory outside the repository containing the full handoff package, `run.json`, `progress.jsonl`, and per-turn artifacts (`turn-001-events.jsonl`, `turn-001.err`, `turn-001-final.txt`, and cumulative `usage.json`). Give their absolute paths in the handoff's `PROGRESS CHANNEL` section. `run.json` holds only non-secret routing state: `HANDOFF_ID`, Navigator host (`navigator_host`), Builder adapter host (`adapter_host`), Builder session id once observed, repository/worktree, branch, model/effort, permission boundary, next turn number, and artifact paths. Do not put credentials, prompts, or conversation content in it.
-
-When the adapter reports the executor surface ready, create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, and launch through that adapter's documented initial command. Capture the native event stream and stderr into the turn artifacts. Do not implement in parallel or ask the user to copy the prompt.
-
-After the process exits, run the installed runtime adapter against that turn:
+For a persistent backend, allocate the run directory outside the source worktree and use the persistent protocol. `kimi-sub` uses ACP over stdio; other backends that lack a persistent driver must fail explicitly or use the documented legacy path with the non-persistent limitation stated.
 
 ```sh
-python "<installed-prewalk>/scripts/prewalk_runtime.py" inspect --host "<adapter-host>" --builder-turn 1 --events "<run-dir>/turn-001-events.jsonl" --final-message "<run-dir>/turn-001-final.txt" --usage "<run-dir>/usage.json"
+python "<installed-prewalk>/scripts/prewalk_builder.py" launch --run-dir "<run-dir>" --plan "<run-dir>/plan.json" --backend kimi-sub
+python "<installed-prewalk>/scripts/prewalk_builder.py" status --run-dir "<run-dir>"
+python "<installed-prewalk>/scripts/prewalk_builder.py" execute --run-dir "<run-dir>" --text "<short execute delta>"
+python "<installed-prewalk>/scripts/prewalk_builder.py" review --run-dir "<run-dir>"
 ```
 
-Require the adapter-defined process success, the runtime-extracted session id, and the runtime-extracted final message. Record the session id in `run.json` for later turns. `usage.json` is cumulative schema_version 2 state: `calls` holds raw model-call records, `turns` holds one aggregate per Builder turn, and the same file is passed to later turns. The runtime reports provider usage and cost only when the host stream actually contains them; missing usage means `unavailable`, not zero. Treat usage as observability evidence, never as proof of quality.
+Wait for `AWAITING_NAVIGATOR` before `execute`; this is a live wait in the same PID/session, not a new Builder process. The supervisor creates an isolated worktree based on L1 when present, otherwise L0. It retains full diffs, independently runs the plan's validation commands, and writes `builder-review.patch/json` plus `validation/` records. Do not read Builder's prose summary or treat it as evidence.
 
-Report the run directory, the background task id when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
+Navigator reviews the actual patch and validation evidence, then explicitly approves or discards. Approval runs `git apply --check` before applying `base..final` to the original worktree; nothing merges automatically. Failed worktrees remain for diagnosis until Navigator explicitly discards or salvages them.
 
-After the executor process finishes, require its runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted) and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the adapter's documented repair/diagnostic step. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
+```sh
+python "<installed-prewalk>/scripts/prewalk_builder.py" approve --run-dir "<run-dir>"
+# or, after a deliberate decision:
+python "<installed-prewalk>/scripts/prewalk_builder.py" discard --run-dir "<run-dir>"
+```
+
+For corrections, send another short `execute` delta to the same live Builder. For model/effort changes, provide a real compaction id and use `route --compaction-id <id>` so the ACP session and PID stay intact and `routes.jsonl` records the reason. Do not switch models on the first failure or send keepalive prompts.
 
 ### Optional async mode
 
@@ -194,7 +203,9 @@ Before finishing:
 - Run the strongest practical focused and regression validation.
 - Mark TODO items accurately; leave unresolved work explicit.
 
-### Return to Navigator
+### Return to Navigator (legacy one-shot path)
+
+Persistent Builders return process metadata, complete diffs, and validation artifacts; they do not return a prose acceptance package. The following applies only to a legacy one-shot adapter.
 
 Read [handoff-format.md](references/handoff-format.md). Return a concise completion status followed by one fenced, copy-ready package using the **Builder to Navigator** template. Generate it whether execution completed, became blocked, or was escalated. The package begins with `PREWALK_PHASE: NAVIGATOR_REVIEW`; the legacy `PREWALK_PHASE: SOL_REVIEW` remains accepted during migration.
 
@@ -204,7 +215,7 @@ Include the original objective, inherited first edit, complete changed-path inve
 
 ## Phase C: Navigator review
 
-Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. In async mode with git layers, start from the run dir's `review.md` (built from `refs/prewalk/<id>/*`, not the Builder's report): its timeline, flags (`empty_after_L1`, `out_of_scope`, `template_edited`, `claim_mismatch`) and Builder diff L1..final; see [async-mode.md](references/async-mode.md). Review for:
+Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Do not read or rely on Builder's summary. For a persistent run, inspect `builder-review.patch`, `builder-review.json`, and `validation/`; require actual diff and passing independent validation. For a legacy async run, start from `review.md` built from Git layers, not Builder prose. Review for:
 
 - Requirement coverage and behavioral correctness
 - Root-cause alignment and architectural consistency
@@ -212,7 +223,7 @@ Enter this phase after the orchestrated Builder child returns or when the incomi
 - Test quality and gaps between claimed and observed validation
 - Unrelated or accidental changes
 
-Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Before accepting the return, inspect `run.json` and that turn's `prewalk_runtime.py` output; require the runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` or legacy `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`, and require the observed Builder session id to match the recorded one. Confirm the runtime `--host` value matches the selected adapter. Inspect the cumulative schema_version 2 usage artifact: `turns` must be one aggregate per Builder turn, `calls` must be the raw model-call records, and re-inspecting the same turn must replace rather than duplicate its aggregate. Record per-Builder-turn and per-call usage, cache ratio with its adapter-specific denominator, and cost status and scope as observability only; they are not quality evidence and do not prove a cache benefit. A client-side estimate is not an invoice; a session-cumulative estimate is retained as the latest value, never summed. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
+Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. For a persistent run, require `READY_FOR_REVIEW`, matching PID/session, actual diff, and validation artifacts before `approve`; no Builder text is required. For a legacy run, inspect `run.json` and that turn's `prewalk_runtime.py` output, including its return marker, session identity, and cumulative usage. Treat all usage and cost records as observability only, never proof of quality or model identity.
 
 If a progress file exists, read it as navigation context only. A missing or stale progress file is not proof of failure or of a hung process: inspect the background task and raw output before diagnosing, and report the last event time rather than inventing activity. Never treat the final progress event as approval evidence — verify the actual diff.
 

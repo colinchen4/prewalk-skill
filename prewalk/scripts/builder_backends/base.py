@@ -173,6 +173,7 @@ class Backend:
     env_remove: tuple[str, ...] = ()
     min_version: str | None = None
     implemented = True                  # False -> registry stub, launch() raises
+    persistent = False                  # True -> ACP-style live session, not one-shot resume
     listed = True                       # False -> hidden from doctor (test-only backends)
     in_default_chain = True             # False -> only used when explicitly selected
     retry_exit_codes: tuple[int, ...] = ()

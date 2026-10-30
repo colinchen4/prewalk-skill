@@ -6,7 +6,7 @@ The Builder is a second CLI process on a **weak model**. `scripts/builder_backen
 | --- | --- | --- | --- | --- |
 | `claude-code-sub` | A, Claude Pro/Max login | `claude -p --model sonnet` (`haiku`) | `--effort`, default `medium` | fixture-tested |
 | `codex-sub` | A, ChatGPT login | `codex exec -m gpt-6-luna` (`gpt-6.1-terra`) | `-c model_reasoning_effort=…`, default `high` | fixture-tested; effort key unverified |
-| `kimi-sub` | A, Kimi membership | `kimi -m kimi-code/kimi-for-coding` (`kimi-code/k3-256k`) | none (config) | basic; managed OAuth probe on current CLI |
+| `kimi-sub` | A, Kimi membership | `kimi acp` / `kimi -m kimi-code/kimi-for-coding` (`kimi-code/k3-256k`) | ACP `low/high/max`, default `low` | persistent ACP and OAuth live-verified |
 | `opencode-api` | B, external API | opencode + DeepSeek | – | stub |
 | `pi-api` | B, external API | pi + DeepSeek | – | stub |
 | `codex-deepseek` (`codex:deepseek`) | legacy | Codex Desktop + DeepSeek manager | low/medium/high | optional, explicit only |
@@ -32,7 +32,7 @@ There is no mandatory first-run setup. Navigator defaults to the current session
 
 ## Effort
 
-Canonical values `minimal low medium high xhigh max`. An unsupported request resolves to the nearest supported level at or below it (never up); a request below the backend's minimum supported level is rejected. Both values are recorded (`requested_effort`, `effective_effort`). Kimi has no effort flag: effective is `null`.
+Canonical values `minimal low medium high xhigh max`. An unsupported request resolves to the nearest supported level at or below it (never up); a request below the backend's minimum supported level is rejected. Both values are recorded (`requested_effort`, `effective_effort`). Kimi's legacy one-shot interface has no effort flag and records `null`; its persistent ACP interface supports `low high max` and defaults to `low`.
 
 ## Limits
 

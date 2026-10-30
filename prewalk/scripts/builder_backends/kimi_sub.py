@@ -4,8 +4,8 @@ VERIFIED (kimi.com/code/docs, 2026-10-30): -p, --output-format stream-json, -m <
   -S/--session <id>; -p runs under the auto permission policy; kimi-for-coding (K2.8)
   is available from Plus. On CLI 0.43.1, `kimi provider list` exposes the managed
   provider's `source=oauth` without printing credentials, including Desktop logins.
-UNVERIFIED: there is no CLI effort flag (effort comes from config); the managed alias
-  name for -m; whether exit 75 means "retry later".
+  ACP `session/set_config_option` exposes thinking low|high|max; one-shot `-p`
+  has no effort flag. UNVERIFIED: the managed alias name for -m and exit 75 semantics.
 """
 
 from __future__ import annotations
@@ -17,12 +17,13 @@ from .base import BOOTSTRAP, BOOTSTRAP_RESUME, Auth, Backend, Detection, Launch,
 
 class KimiSub(Backend):
     id, track, family, binary, runtime_host = "kimi-sub", "A", "kimi", "kimi", "kimi"
-    weak_model, weak_effort = "kimi-code/kimi-for-coding", None
+    weak_model, weak_effort = "kimi-code/kimi-for-coding", "low"
     alt_models = ("kimi-code/k3-256k",)
     blocked_models = ("kimi-for-coding-highspeed",)    # 3x quota: not a cheap Builder
-    supported_efforts = ()
+    supported_efforts = ("low", "high", "max")
+    persistent = True
     retry_exit_codes = (75,)                            # UNVERIFIED
-    validation = "basic; managed OAuth probe plus live-validated launch shape, alias unverified"
+    validation = "persistent ACP and managed OAuth live-verified; one-shot alias unverified"
     login_hint = "kimi login   (only when provider list has no managed OAuth provider)"
 
     def auth_check(self, detection: Detection | None = None) -> Auth:
