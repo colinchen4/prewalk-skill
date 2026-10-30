@@ -61,6 +61,13 @@ class DoctorTests(CliCase):
         self.assertEqual(report["navigator_host_source"], "PREWALK_HOST")
         self.assertEqual(report["recommended"]["backend"], "claude-code-sub")
 
+    def test_api_key_logins_are_not_auto_recommended(self):
+        os.environ["FAKE_CLAUDE_AUTH"] = "api_key"
+        os.environ["FAKE_CODEX_AUTH"] = "api_key"
+        code, out, _ = self.cli("doctor", "--json", "--navigator-host", "claude-code")
+        self.assertEqual(code, 3)
+        self.assertIsNone(json.loads(out)["recommended"])
+
     def test_doctor_is_read_only(self):
         self.cli("doctor", "--navigator-host", "claude-code")
         self.assertFalse(self.home.exists())
@@ -105,7 +112,8 @@ class SetupTests(CliCase):
         self.assertEqual(cfg["builder"], {"backend": "claude-code-sub", "model": "sonnet",
                                           "effort": "medium", "max_concurrency": 1})
         self.assertEqual(cfg["schema_version"], 2)
-        self.assertEqual(oct(prewalk_config.config_path().stat().st_mode & 0o777), "0o600")
+        if os.name != "nt":
+            self.assertEqual(oct(prewalk_config.config_path().stat().st_mode & 0o777), "0o600")
         code, out, _ = self.cli("doctor", "--json", "--navigator-host", "codex")
         self.assertEqual(json.loads(out)["recommended"]["reason"], "saved config")
         self.assertEqual(json.loads(out)["recommended"]["backend"], "claude-code-sub")

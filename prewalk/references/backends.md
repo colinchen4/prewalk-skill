@@ -27,11 +27,11 @@ python3 scripts/prewalk.py setup                  # accept the recommendation (o
 python3 scripts/prewalk.py test                   # one round trip in a throwaway git repo
 ```
 
-Navigator host: `--navigator-host`, else `PREWALK_HOST`, else auto-detect. Pairing: saved config if still ready → same family as Navigator → other ready Track A (claude, codex, kimi) → ready Track B → fallback hint, exit 3. Same-family Builders share the Navigator's plan quota; the weak model is what keeps that cheap. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
+Navigator host: `--navigator-host`, else `PREWALK_HOST`, else auto-detect. Pairing: saved config if still ready → same family as Navigator → other ready Track A → ready Track B → fallback hint, exit 3. Automatic Track A recommendations require verified subscription billing, not an API-key login. Kimi is explicit-only in phase 1 (`setup --backend kimi-sub` followed by `prewalk.py test`) because it has no read-only login probe; it is not auto-recommended or reused as a ready saved pairing. Same-family Builders share the Navigator's plan quota; the weak model is what keeps that cheap. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
 
 ## Effort
 
-Canonical values `minimal low medium high xhigh max`. An unsupported request resolves to the nearest supported level at or below it (never up) and both values are recorded (`requested_effort`, `effective_effort`). Kimi has no effort flag: effective is `null`.
+Canonical values `minimal low medium high xhigh max`. An unsupported request resolves to the nearest supported level at or below it (never up); a request below the backend's minimum supported level is rejected. Both values are recorded (`requested_effort`, `effective_effort`). Kimi has no effort flag: effective is `null`.
 
 ## Limits
 

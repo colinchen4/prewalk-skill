@@ -26,6 +26,7 @@ A quota/rate-limit exit is reported as ``waiting_rate_limit`` (retryable), not
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -217,6 +218,31 @@ def _active_file(run_dir: Path) -> Path:
     return _active_dir() / (hashlib.sha256(str(run_dir).encode()).hexdigest()[:16] + ".json")
 
 
+@contextlib.contextmanager
+def _active_lock():
+    _active_dir().mkdir(parents=True, exist_ok=True)
+    with open(_active_dir() / ".lock", "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        elif fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
 def _check_concurrency(run_dir: Path) -> None:
     limit = prewalk_config.max_concurrency()
     others = [e for e in _active_entries() if e.get("run_dir") != str(run_dir)]
@@ -362,35 +388,35 @@ def launch(run_dir: Path, brief_path: Path, turn: int = 1,
     if paths["cancel"].exists():
         paths["cancel"].unlink()
     registry = _uses_registry(brief)
-    if registry:
-        _check_concurrency(run_dir)
-    if turn == 1:
-        first_edit = _prepare_layers(run_dir, brief)
-        prewalk_runtime._atomic_write_text(paths["brief"], render_brief(brief, paths, first_edit))
-    elif not paths["brief"].exists():
-        raise AsyncError(f"write the resume delta to {paths['brief']} first")
-    _write_json(run_dir / "brief.json", brief)
-    previous = state
-    state = {"handoff_id": brief["handoff_id"], "host": _runtime_host(brief),
-             "turn": turn, "expected_session": expected_session or previous.get("session_id"),
-             "session_id": previous.get("session_id"), "status": "starting", "launched_at": _now()}
-    if registry:
-        b = bb.get(brief["backend"])
-        state.update(backend=b.id, model=brief.get("model") or b.weak_model,
-                     requested_effort=brief.get("effort") or b.weak_effort)
-    if previous.get("attempts"):
-        state["attempts"] = previous["attempts"]
-    _write_json(paths["state"], state)
-    sup = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "_supervise",
-         "--run-dir", str(run_dir), "--turn", str(turn)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        close_fds=True, **popen_group_kwargs(),
-    )
-    if registry:
-        _active_dir().mkdir(parents=True, exist_ok=True)
-        _write_json(_active_file(run_dir), {"run_dir": str(run_dir), "supervisor_pid": sup.pid,
-                                            "backend": state["backend"], "since": _now()})
+    with _active_lock() if registry else contextlib.nullcontext():
+        if registry:
+            _check_concurrency(run_dir)
+        if turn == 1:
+            first_edit = _prepare_layers(run_dir, brief)
+            prewalk_runtime._atomic_write_text(paths["brief"], render_brief(brief, paths, first_edit))
+        elif not paths["brief"].exists():
+            raise AsyncError(f"write the resume delta to {paths['brief']} first")
+        _write_json(run_dir / "brief.json", brief)
+        previous = state
+        state = {"handoff_id": brief["handoff_id"], "host": _runtime_host(brief),
+                 "turn": turn, "expected_session": expected_session or previous.get("session_id"),
+                 "session_id": previous.get("session_id"), "status": "starting", "launched_at": _now()}
+        if registry:
+            b = bb.get(brief["backend"])
+            state.update(backend=b.id, model=brief.get("model") or b.weak_model,
+                         requested_effort=brief.get("effort") or b.weak_effort)
+        if previous.get("attempts"):
+            state["attempts"] = previous["attempts"]
+        _write_json(paths["state"], state)
+        sup = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "_supervise",
+             "--run-dir", str(run_dir), "--turn", str(turn)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, **popen_group_kwargs(),
+        )
+        if registry:
+            _write_json(_active_file(run_dir), {"run_dir": str(run_dir), "supervisor_pid": sup.pid,
+                                                "backend": state["backend"], "since": _now()})
     return {"ok": True, "run_dir": str(run_dir), "turn": turn, "supervisor_pid": sup.pid,
             "brief": str(paths["brief"]), "progress": str(paths["progress"]),
             "next": "keep working; check back with `status --after <last_seq>`"}

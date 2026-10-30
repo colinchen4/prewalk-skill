@@ -18,7 +18,7 @@ WT, BRIEF, RUN = "/w/tree", "/w/run/brief.txt", "/w/run"
 
 def snap(launch: bb.Launch) -> list[str]:
     """argv with the resolved executable reduced to its basename."""
-    return [os.path.basename(launch.argv[0])] + launch.argv[1:]
+    return [os.path.splitext(os.path.basename(launch.argv[0]))[0]] + launch.argv[1:]
 
 
 class FakePathCase(unittest.TestCase):
@@ -100,6 +100,13 @@ class ClaudeTests(FakePathCase):
         self.assertEqual(env, {"PATH": "/bin", "OPENAI_API_KEY": "keep"})
         self.assertNotIn("SENTINEL-SECRET", json.dumps(l.describe()))   # describe never carries env values
 
+    def test_env_removal_is_case_insensitive_on_windows(self):
+        launch = bb.get("claude-code-sub").launch(turn=1, workdir=WT, brief_path=BRIEF)
+        with unittest.mock.patch("builder_backends.base.os.name", "nt"):
+            env = launch.build_env({"anthropic_api_key": "secret",
+                                    "Anthropic_Default_Sonnet_Model": "opus", "PATH": "/bin"})
+        self.assertEqual(env, {"PATH": "/bin"})
+
     def test_auth_probe_subscription_and_logged_out(self):
         b = bb.get("claude-code-sub")
         d = b.detect()
@@ -154,10 +161,9 @@ class CodexTests(FakePathCase):
             with self.subTest(m=m), self.assertRaises(bb.BackendError):
                 bb.get("codex-sub").check_model(m)
 
-    def test_effort_requested_vs_effective(self):
-        l = bb.get("codex-sub").launch(turn=1, workdir=WT, brief_path=BRIEF, effort="minimal")
-        self.assertEqual((l.requested_effort, l.effective_effort), ("minimal", "low"))
-        self.assertTrue(l.notes)
+    def test_effort_below_minimum_is_rejected(self):
+        with self.assertRaises(bb.BackendError):
+            bb.get("codex-sub").launch(turn=1, workdir=WT, brief_path=BRIEF, effort="minimal")
 
     def test_auth_probe(self):
         b = bb.get("codex-sub")
@@ -189,7 +195,8 @@ class KimiAndLegacyTests(FakePathCase):
 class EffortAndLimitTests(unittest.TestCase):
     def test_resolve_effort_never_rounds_up(self):
         b = bb.get("claude-code-sub")
-        self.assertEqual(b.resolve_effort("minimal"), "low")   # nothing lower: lowest supported
+        with self.assertRaises(bb.BackendError):
+            b.resolve_effort("minimal")
         self.assertEqual(b.resolve_effort("xhigh"), "xhigh")
         self.assertIsNone(b.resolve_effort(None))
         with self.assertRaises(bb.BackendError):
@@ -212,7 +219,7 @@ class RecommendTests(unittest.TestCase):
         for b in bb.listed():
             r = {"id": b.id, "track": b.track, "family": b.family, "implemented": b.implemented,
                  "in_default_chain": b.in_default_chain, "installed": b.id in ready,
-                 "auth": "ready" if b.id in ready else "not_installed",
+                 "auth": "ready" if b.id in ready else "not_installed", "billing": "subscription",
                  "weak_model": b.weak_model, "weak_effort": b.weak_effort}
             out.append(r)
         return out
@@ -235,6 +242,13 @@ class RecommendTests(unittest.TestCase):
 
     def test_stubs_and_legacy_never_recommended(self):
         self.assertIsNone(bb.recommend(self.rows(("opencode-api", "pi-api", "codex-deepseek")), "codex"))
+
+    def test_track_a_api_key_login_is_not_usable(self):
+        rows = self.rows(("claude-code-sub",))
+        rows[0]["billing"] = "api_key"
+        self.assertIsNone(bb.recommend(rows, "claude-code"))
+        saved = {"backend": "claude-code-sub", "model": "sonnet", "effort": "medium"}
+        self.assertIsNone(bb.recommend(rows, "claude-code", saved))
 
 
 if __name__ == "__main__":

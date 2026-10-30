@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import unittest.mock
@@ -48,7 +49,7 @@ class BackendAsyncTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def brief(self, name="brief.json", **extra):
-        data = {"handoff_id": "h1", "backend": "mock", "goal": "write hello.txt",
+        data = {"handoff_id": "h1", "backend": "mock", "goal": "write hello.txt", "layers": False,
                 "success": ["hello.txt exists"], "scope": ["hello.txt"], "cwd": str(self.wt), **extra}
         p = self.root / name
         p.write_text(json.dumps(data))
@@ -122,6 +123,32 @@ class BackendAsyncTests(unittest.TestCase):
         self.assertEqual(out["status"], "cancelled", out)
         ASYNC.launch(run_b, self.brief("b.json", handoff_id="h2"))   # slot released
         self.assertEqual(ASYNC.wait(run_b, 30)["status"], "completed")
+
+    def test_simultaneous_launches_atomically_share_one_slot(self):
+        run_a, run_b = self.run_dir("race-a"), self.run_dir("race-b")
+        briefs = [self.brief("race-a.json", model="mock-slow"),
+                  self.brief("race-b.json", handoff_id="h2", model="mock-slow")]
+        barrier = threading.Barrier(2)
+        launched, errors = [], []
+
+        def compete(run, brief):
+            barrier.wait(timeout=10)
+            try:
+                ASYNC.launch(run, brief)
+                launched.append(run)
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=compete, args=(run, brief))
+                   for run, brief in zip((run_a, run_b), briefs)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=15)
+        self.assertEqual(len(launched), 1, errors)
+        self.assertEqual(len(errors), 1)
+        self.assertIn("concurrency limit 1", str(errors[0]))
+        ASYNC.cancel(launched[0], timeout=6)
 
     def test_literal_argv_overrides_backend(self):
         run = self.run_dir()

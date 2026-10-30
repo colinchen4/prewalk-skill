@@ -159,6 +159,7 @@ def _git(cwd: Path, *args: str) -> None:
 def selftest(backend: str | None, model: str | None, effort: str | None, keep: bool,
              timeout: float) -> tuple[dict[str, Any], int]:
     import prewalk_async
+    import prewalk_layers
     if backend is None:
         cfg, _ = prewalk_config.load()
         backend = (cfg.get("builder") or {}).get("backend")
@@ -174,6 +175,7 @@ def selftest(backend: str | None, model: str | None, effort: str | None, keep: b
     (repo / "README.md").write_text("prewalk self-test\n", encoding="utf-8")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-q", "-m", "init")
+    prewalk_layers.snapshot(repo, run, "selftest", "L0", "navigator", "inherited baseline")
     (repo / "hello.txt").write_text("first edit by navigator\n", encoding="utf-8")
     brief = {"handoff_id": "selftest", "backend": b.id, "goal":
              "Append the line `hello from builder` to hello.txt. Change nothing else.",

@@ -68,7 +68,9 @@ def recommend(rows: Iterable[dict[str, Any]], navigator_host: str | None,
     by_id = {r["id"]: r for r in rows}
 
     def usable(r: dict[str, Any] | None) -> bool:
-        return bool(r) and r["implemented"] and r["installed"] and r["auth"] == "ready"
+        if not r or not r["implemented"] or not r["installed"] or r["auth"] != "ready":
+            return False
+        return r["track"] != "A" or r.get("billing") == "subscription"
 
     def pick(r: dict[str, Any], reason: str, model=None, effort=None) -> dict[str, Any]:
         return {"backend": r["id"], "model": model or r["weak_model"],

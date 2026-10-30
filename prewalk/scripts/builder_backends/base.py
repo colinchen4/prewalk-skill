@@ -106,13 +106,18 @@ class Launch:
 def child_env(base: Mapping[str, str], remove: Iterable[str] = (),
               overlay: Mapping[str, str] | None = None) -> dict[str, str]:
     env = dict(base)
+
+    def normalized(value: str) -> str:
+        return value.upper() if os.name == "nt" else value
+
     for name in remove:
         if name.endswith("*"):
-            prefix = name[:-1]
-            for key in [k for k in env if k.startswith(prefix)]:
+            prefix = normalized(name[:-1])
+            for key in [k for k in env if normalized(k).startswith(prefix)]:
                 env.pop(key, None)
         else:
-            env.pop(name, None)
+            for key in [k for k in env if normalized(k) == normalized(name)]:
+                env.pop(key, None)
     env.update(overlay or {})
     return env
 
@@ -229,7 +234,9 @@ class Backend:
             return effort
         order = CANONICAL_EFFORTS
         below = [e for e in ok if order.index(e) <= order.index(effort)]
-        return below[-1] if below else ok[0]
+        if not below:
+            raise BackendError(f"{self.id}: effort {effort!r} is below the minimum supported {ok[0]!r}")
+        return below[-1]
 
     # ------------------------------------------------------------ launch
     def launch(self, *, turn: int, workdir: str, brief_path: str, model: str | None = None,
