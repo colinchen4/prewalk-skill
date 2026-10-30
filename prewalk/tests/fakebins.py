@@ -50,8 +50,14 @@ elif backend == "codex":
             raise SystemExit(0)
         print("Not logged in")
         raise SystemExit(1)
-elif backend == "kimi" and args == ["--version"]:
-    print("kimi, version 1.40.0")
+elif backend == "kimi":
+    if args == ["--version"]:
+        print("kimi, version 1.40.0")
+    elif args[:2] == ["provider", "list"]:
+        if os.environ.get("FAKE_KIMI_AUTH") == "oauth":
+            print("managed:kimi-code  type=kimi  models=6  source=oauth")
+        else:
+            print("deepseek  type=openai  models=4  source=inline")
 raise SystemExit(0)
 '''
 

@@ -36,6 +36,33 @@ def write_jsonl(path: Path, records: list[dict]) -> None:
     )
 
 
+class AtomicWriteTests(unittest.TestCase):
+    def test_replace_retries_transient_permission_errors(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "state.json"
+            real_replace = RUNTIME.os.replace
+            calls = []
+
+            def flaky_replace(source, target):
+                calls.append((source, target))
+                if len(calls) <= 2:
+                    raise PermissionError()
+                real_replace(source, target)
+
+            with mock.patch.object(RUNTIME.os, "replace", side_effect=flaky_replace) as replace, \
+                 mock.patch.object(RUNTIME.time, "sleep"):
+                RUNTIME._atomic_write_text(path, '{"status": "completed"}\n')
+            self.assertEqual(replace.call_count, 3)
+            self.assertEqual(path.read_text(encoding="utf-8"), '{"status": "completed"}\n')
+
+    def test_read_retries_transient_permission_errors(self):
+        with mock.patch.object(
+            Path, "read_text", side_effect=[PermissionError(), PermissionError(), "ok"]
+        ) as read, mock.patch.object(RUNTIME.time, "sleep"):
+            self.assertEqual(RUNTIME._read_text_with_retry(Path("state.json")), "ok")
+        self.assertEqual(read.call_count, 3)
+
+
 def kimi_events(
     final: str = "KIMI_FINAL\nPREWALK_PHASE: SOL_REVIEW",
     session_id: str = SESSION_ID,

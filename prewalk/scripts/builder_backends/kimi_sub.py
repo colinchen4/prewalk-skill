@@ -2,16 +2,17 @@
 
 VERIFIED (kimi.com/code/docs, 2026-10-30): -p, --output-format stream-json, -m <alias>,
   -S/--session <id>; -p runs under the auto permission policy; kimi-for-coding (K2.8)
-  is available from Plus.
+  is available from Plus. On CLI 0.43.1, `kimi provider list` exposes the managed
+  provider's `source=oauth` without printing credentials, including Desktop logins.
 UNVERIFIED: there is no CLI effort flag (effort comes from config); the managed alias
-  name for -m; a read-only login probe; whether exit 75 means "retry later".
+  name for -m; whether exit 75 means "retry later".
 """
 
 from __future__ import annotations
 
 import os
 
-from .base import BOOTSTRAP, BOOTSTRAP_RESUME, Auth, Backend, BackendError, Detection, Launch
+from .base import BOOTSTRAP, BOOTSTRAP_RESUME, Auth, Backend, Detection, Launch, run_probe
 
 
 class KimiSub(Backend):
@@ -21,14 +22,20 @@ class KimiSub(Backend):
     blocked_models = ("kimi-for-coding-highspeed",)    # 3x quota: not a cheap Builder
     supported_efforts = ()
     retry_exit_codes = (75,)                            # UNVERIFIED
-    validation = "basic; launch shape from the live-validated kimi adapter, alias unverified"
-    login_hint = "kimi   (then /login with your Kimi membership)"
+    validation = "basic; managed OAuth probe plus live-validated launch shape, alias unverified"
+    login_hint = "kimi login   (only when provider list has no managed OAuth provider)"
 
     def auth_check(self, detection: Detection | None = None) -> Auth:
+        exe = (detection.path if detection else None) or self._exe()
+        code, out = run_probe([exe, "provider", "list"], env=self.probe_env())
+        if code == 0:
+            for line in out.splitlines():
+                fields = line.split()
+                if line.strip().startswith("managed:") and "type=kimi" in fields and "source=oauth" in fields:
+                    return Auth("ready", "subscription", "managed Kimi OAuth provider found")
         home = os.environ.get("KIMI_CODE_HOME") or os.path.expanduser("~/.kimi-code")
         if os.path.exists(os.path.join(home, "config.toml")):
-            return Auth("unknown", "subscription",
-                        "config found; login state is not probeable read-only (UNVERIFIED)")
+            return Auth("unknown", "subscription", "config found; managed OAuth provider not detected")
         return Auth("needs_login", "unknown", "run: " + self.login_hint)
 
     def launch(self, *, turn, workdir, brief_path, model=None, effort=None, session=None,

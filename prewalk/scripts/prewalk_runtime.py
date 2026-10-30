@@ -22,6 +22,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
@@ -100,6 +101,29 @@ def _iso_from_millis(value: Any) -> str | None:
     return stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _read_text_with_retry(path: Path, encoding: str = "utf-8") -> str:
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            return Path(path).read_text(encoding=encoding)
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _replace_with_retry(temp_name: str, path: Path) -> None:
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.replace(temp_name, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -111,7 +135,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, path)
+        _replace_with_retry(temp_name, path)
     except BaseException:
         try:
             os.unlink(temp_name)

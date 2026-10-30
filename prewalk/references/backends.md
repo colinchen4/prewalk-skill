@@ -6,7 +6,7 @@ The Builder is a second CLI process on a **weak model**. `scripts/builder_backen
 | --- | --- | --- | --- | --- |
 | `claude-code-sub` | A, Claude Pro/Max login | `claude -p --model sonnet` (`haiku`) | `--effort`, default `medium` | fixture-tested |
 | `codex-sub` | A, ChatGPT login | `codex exec -m gpt-6-luna` (`gpt-6.1-terra`) | `-c model_reasoning_effort=…`, default `high` | fixture-tested; effort key unverified |
-| `kimi-sub` | A, Kimi membership | `kimi -m kimi-code/kimi-for-coding` (`kimi-code/k3-256k`) | none (config) | basic |
+| `kimi-sub` | A, Kimi membership | `kimi -m kimi-code/kimi-for-coding` (`kimi-code/k3-256k`) | none (config) | basic; managed OAuth probe on current CLI |
 | `opencode-api` | B, external API | opencode + DeepSeek | – | stub |
 | `pi-api` | B, external API | pi + DeepSeek | – | stub |
 | `codex-deepseek` (`codex:deepseek`) | legacy | Codex Desktop + DeepSeek manager | low/medium/high | optional, explicit only |
@@ -27,7 +27,7 @@ python3 scripts/prewalk.py setup                  # accept the recommendation (o
 python3 scripts/prewalk.py test                   # one round trip in a throwaway git repo
 ```
 
-Navigator host: `--navigator-host`, else `PREWALK_HOST`, else auto-detect. Pairing: saved config if still ready → same family as Navigator → other ready Track A → ready Track B → fallback hint, exit 3. Automatic Track A recommendations require verified subscription billing, not an API-key login. Kimi is explicit-only in phase 1 (`setup --backend kimi-sub` followed by `prewalk.py test`) because it has no read-only login probe; it is not auto-recommended or reused as a ready saved pairing. Same-family Builders share the Navigator's plan quota; the weak model is what keeps that cheap. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
+Navigator host: `--navigator-host`, else `PREWALK_HOST`, else auto-detect. Pairing: saved config if still ready → same family as Navigator → other ready Track A → ready Track B → fallback hint, exit 3. Automatic Track A recommendations require verified subscription billing, not an API-key login. Kimi accepts a managed provider reported by `kimi provider list` with `type=kimi` and `source=oauth`, so an existing Desktop login can be reused without another login. If no managed OAuth provider is listed, run `kimi login` or use another backend. Same-family Builders share the Navigator's plan quota; the weak model is what keeps that cheap. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
 
 ## Effort
 

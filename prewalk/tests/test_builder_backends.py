@@ -183,6 +183,13 @@ class KimiAndLegacyTests(FakePathCase):
         self.assertEqual(snap(l2)[:3], ["kimi", "--session", "k-1"])
         self.assertEqual(b.auth_check().state, "needs_login")
 
+    def test_kimi_managed_oauth_is_ready_and_recommended(self):
+        os.environ["FAKE_KIMI_AUTH"] = "oauth"
+        backend = bb.get("kimi-sub")
+        auth = backend.auth_check()
+        self.assertEqual((auth.state, auth.billing), ("ready", "subscription"))
+        self.assertEqual(bb.recommend([backend.describe()], "kimi")["backend"], "kimi-sub")
+
     def test_kimi_exit_75_is_rate_limit(self):
         self.assertEqual(bb.get("kimi-sub").classify_failure(75, ""), "rate_limited")
 

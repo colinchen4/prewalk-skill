@@ -32,7 +32,8 @@ FALLBACK = """No Builder backend is ready. Pick one:
   A) Use your subscription (recommended):
      claude auth login            # Claude Pro/Max  -> Builder: sonnet
      codex login                  # ChatGPT Plus/Pro -> Builder: gpt-6-luna
-     kimi   then /login           # Kimi membership  -> Builder: kimi-for-coding
+     kimi provider list           # existing Desktop OAuth is reused when managed:* has source=oauth
+     kimi login                   # only if no managed Kimi OAuth provider is listed
   B) Use an external API with an open agent (phase 2):
      pi:        export DEEPSEEK_API_KEY=...
      opencode:  opencode auth login --provider deepseek

@@ -68,7 +68,7 @@ def _now() -> str:
 
 def _read_json(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(prewalk_runtime._read_text_with_retry(path))
     except FileNotFoundError:
         return default
 

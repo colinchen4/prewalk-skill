@@ -55,11 +55,19 @@ class DoctorTests(CliCase):
         self.assertNotIn("mock", [r["id"] for r in report["backends"]])
 
     def test_host_from_env_and_cross_family(self):
-        os.environ["PREWALK_HOST"] = "kimi"   # kimi has no read-only login probe -> not ready
+        os.environ["PREWALK_HOST"] = "kimi"   # no managed OAuth provider -> cross-family fallback
         code, out, _ = self.cli("doctor", "--json")
         report = json.loads(out)
         self.assertEqual(report["navigator_host_source"], "PREWALK_HOST")
         self.assertEqual(report["recommended"]["backend"], "claude-code-sub")
+
+    def test_kimi_desktop_oauth_is_recommended(self):
+        os.environ["FAKE_KIMI_AUTH"] = "oauth"
+        code, out, _ = self.cli("doctor", "--json", "--navigator-host", "kimi")
+        report = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(report["recommended"]["backend"], "kimi-sub")
+        self.assertEqual(report["recommended"]["model"], "kimi-code/kimi-for-coding")
 
     def test_api_key_logins_are_not_auto_recommended(self):
         os.environ["FAKE_CLAUDE_AUTH"] = "api_key"
@@ -72,7 +80,7 @@ class DoctorTests(CliCase):
         self.cli("doctor", "--navigator-host", "claude-code")
         self.assertFalse(self.home.exists())
         log = Path(os.environ["FAKE_LOG"]).read_text().splitlines()
-        self.assertTrue(set(l.split(" ", 1)[1] for l in log) <= {"--version", "auth status", "login status"})
+        self.assertTrue(set(l.split(" ", 1)[1] for l in log) <= {"--version", "auth status", "login status", "provider list"})
 
     def test_text_output_has_accept_line(self):
         code, out, _ = self.cli("doctor", "--navigator-host", "claude-code")
