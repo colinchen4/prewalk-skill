@@ -168,7 +168,7 @@ After the executor process finishes, require its runtime-extracted final message
 
 ### Optional async mode
 
-Serial blocking dispatch above is the default. Only when the user asks for it, or Navigator has independent work while Builder runs, follow [async-mode.md](references/async-mode.md) instead: launch with a short brief through `scripts/prewalk_async.py`, keep working, read only the new progress tail with `status --after`, redirect with `steer`, stop with `cancel`. Final review rules are unchanged.
+Serial blocking dispatch above is the default. Only when the user asks for it, or Navigator has independent work while Builder runs, follow [async-mode.md](references/async-mode.md) instead: before the first edit, capture the inherited worktree as L0 with `prewalk_layers.py snapshot --layer L0`; then make the first edit and launch with a short brief through `scripts/prewalk_async.py`. Keep working, read only the new progress tail with `status --after`, redirect with `steer`, stop with `cancel`. Final review rules are unchanged.
 
 ### Resume the Builder session
 

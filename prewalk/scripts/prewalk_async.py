@@ -257,6 +257,21 @@ def render_brief(brief: dict[str, Any], paths: dict[str, Path], first_edit: str 
 def _pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         done, _ = os.waitpid(pid, os.WNOHANG)
         if done == pid:

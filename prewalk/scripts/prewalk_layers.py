@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Pure-git layer snapshots for Prewalk (no FUSE, no overlayfs).
 
-Idea borrowed from LayerFS: the Navigator's first edit is an immutable layer
-(L1) over the base (L0 = HEAD); every Builder step is captured as another
-layer (L2-<n>) by the supervisor, so Navigator reviews layer evidence instead
-of the Builder's self-report.
+Idea borrowed from LayerFS: L0 captures the inherited worktree before the
+Navigator's first edit, L1 captures that first edit, and every Builder step is
+captured as another layer (L2-<n>) by the supervisor. Navigator reviews layer
+evidence instead of the Builder's self-report.
 
 A snapshot never touches the user's branch, HEAD, index or worktree:
 the real index is *copied* (stat cache reused, so only changed/untracked
 files are rehashed) into a temporary GIT_INDEX_FILE, ``git add -A`` (honours
 .gitignore) + ``write-tree`` + ``commit-tree`` build a commit object, and only
-``refs/prewalk/<handoff-id>/<layer>`` is written.  L0 is HEAD itself: no scan.
+``refs/prewalk/<handoff-id>/<layer>`` is written. L0 must be captured before
+the Navigator edits so pre-existing changes stay out of the task diff.
 
 Run-dir files: layers.json  first-edit.patch  review.md  review.json
 review-L0-final.patch
@@ -213,14 +214,25 @@ def snapshot(cwd: Path, run_dir: Path, handoff_id: str, layer: str | None = None
     with _locked(run_dir):
         doc = load(run_dir)
         if doc is None:
+            if layer != "L0" or via != "navigator":
+                raise LayerError(
+                    "capture L0 with --layer L0 before the Navigator first edit; "
+                    "this preserves the inherited dirty-worktree baseline"
+                )
             head = _head(root)
-            if head is None:  # unborn branch: base is an empty-tree commit object
-                head = git(root, "commit-tree", EMPTY_TREE, "-m", "prewalk L0 (empty)").strip()
-            git(root, "update-ref", _ref(handoff_id, "L0"), head)
-            doc = {"schema_version": 1, "handoff_id": handoff_id, "repo": str(root),
-                   "base": {"name": "L0", "sha": head, "ref": _ref(handoff_id, "L0"),
-                            "head_at_start": _head(root)},
-                   "layers": [], "errors": []}
+            parent = head or git(root, "commit-tree", EMPTY_TREE, "-m", "prewalk L0 parent (empty)").strip()
+            tree = capture_tree(root, run_dir)
+            sha = git(root, "commit-tree", tree, "-p", parent,
+                      "-m", f"prewalk {handoff_id} L0 (navigator): {message}"[:4000]).strip()
+            git(root, "update-ref", _ref(handoff_id, "L0"), sha)
+            entries = manifest(root, parent, sha)
+            record = {"name": "L0", "sha": sha, "tree": tree, "parent": parent, "via": via,
+                      "message": message, "ts": _now(), "ref": _ref(handoff_id, "L0"),
+                      "manifest": entries, "totals": totals(entries), **(extra or {})}
+            doc = {"schema_version": 2, "handoff_id": handoff_id, "repo": str(root),
+                   "base": {**record, "head_at_start": head}, "layers": [], "errors": []}
+            prewalk_runtime._atomic_write_json(layers_path(run_dir), doc)
+            return record
         elif doc["handoff_id"] != handoff_id:
             raise LayerError(f"layers.json belongs to handoff {doc['handoff_id']}")
         layer = layer or next_builder_layer(doc)
@@ -444,7 +456,10 @@ def review_report(run_dir: Path, scope: list[str] | None = None,
         md.append(f"- {l['name']} [{l['via']}{where}] {l['ts'][11:19]}Z \"{l['message'][:120]}\" "
                   f"{t['files']} files +{t['added']} -{t['deleted']}")
         md += format_manifest(l["manifest"], "    ")
-    md += ["", "## Totals",
+    inherited = doc["base"].get("manifest", [])
+    md += ["", "## Inherited worktree (HEAD..L0)",
+           *(format_manifest(inherited, "    ") if inherited else ["    (no inherited changes)"]),
+           "", "## Totals",
            f"- First edit (L0..L1): {l1['totals']['files']} files +{l1['totals']['added']} -{l1['totals']['deleted']}",
            f"- Builder (L1..{final['name']}): {t_b['files']} files +{t_b['added']} -{t_b['deleted']}",
            f"- Overall (L0..{final['name']}): {t_o['files']} files +{t_o['added']} -{t_o['deleted']}",
@@ -454,8 +469,9 @@ def review_report(run_dir: Path, scope: list[str] | None = None,
            or "(empty)", "```",
            f"Full L0..final patch: {full_patch}"]
     report = {"ok": True, "handoff_id": doc["handoff_id"], "flags": flags, "status": state.get("status"),
-              "layers": [l["name"] for l in doc["layers"]], "builder": builder, "overall": overall,
-              "claimed": claim, "review_md": str(run_dir / "review.md"), "full_patch": str(full_patch)}
+              "layers": [l["name"] for l in doc["layers"]], "inherited": inherited,
+              "builder": builder, "overall": overall, "claimed": claim,
+              "review_md": str(run_dir / "review.md"), "full_patch": str(full_patch)}
     prewalk_runtime._atomic_write_text(run_dir / "review.md", "\n".join(md) + "\n")
     prewalk_runtime._atomic_write_json(run_dir / "review.json", report)
     return report
@@ -482,7 +498,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--run-dir", required=True, type=Path)
     p.add_argument("--handoff-id", required=True)
     p.add_argument("--cwd", type=Path, default=Path.cwd())
-    p.add_argument("--layer", help="L1 for the first edit; default next L2-<n>")
+    p.add_argument("--layer", help="L0 before the first edit, L1 after it; default next L2-<n>")
     p.add_argument("--via", default="navigator", choices=("navigator", "builder", "supervisor"))
     p.add_argument("--message", default="")
     for name in ("review-report", "layer-diff"):
