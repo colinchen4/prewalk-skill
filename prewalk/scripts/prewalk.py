@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""prewalk: first-run doctor, setup, and self-test for the Builder backend.
+"""prewalk: lightweight model discovery and optional Builder diagnostics.
 
-    prewalk.py doctor [--json] [--navigator-host HOST]     read-only; exit 3 = nothing ready
+    prewalk.py models [--json] [--navigator-host HOST]     list usable models; never writes config
+    prewalk.py doctor [--json] [--navigator-host HOST]     optional diagnosis; exit 3 = nothing ready
     prewalk.py setup  [--backend ID --model M --effort E --max-concurrency N] [--json]
     prewalk.py test   [--backend ID --model M --effort E] [--keep] [--timeout S]
 
-doctor detects installed CLIs, probes login state read-only (no tokens are read),
-and recommends a Builder on the same family as the Navigator host, on a weak model.
-setup writes ~/.prewalk/config.json (no secrets).  test runs one Builder round trip
-in a throwaway git repo through the async supervisor.
+models lists implemented, installed, ready backends and their model/effort choices.
+setup writes ~/.prewalk/config.json (no secrets). test runs one Builder round trip
+in a throwaway git repo through the async supervisor. None is a required first-run gate.
 """
 
 from __future__ import annotations
@@ -44,6 +44,24 @@ def detect_navigator_host(explicit: str | None = None) -> tuple[str | None, str]
     if any(k.startswith("KIMI_") for k in os.environ):
         return "kimi", "auto (KIMI_* env)"
     return None, "unknown (pass --navigator-host)"
+
+
+def available_models(navigator_host: str | None = None) -> dict[str, Any]:
+    host, host_source = detect_navigator_host(navigator_host)
+    backends = []
+    for backend in bb.listed():
+        row = backend.describe()
+        ready = row["implemented"] and row["installed"] and row["auth"] == "ready"
+        if row["track"] == "A" and row["billing"] != "subscription":
+            ready = False
+        if not ready:
+            continue
+        models = list(dict.fromkeys(m for m in [row["weak_model"], *row["alt_models"]] if m))
+        backends.append({"backend": row["id"], "models": models,
+                         "default_model": row["weak_model"], "default_effort": row["weak_effort"],
+                         "efforts": row["efforts"]})
+    return {"ok": True, "navigator_host": host, "navigator_host_source": host_source,
+            "backends": backends}
 
 
 def doctor(navigator_host: str | None = None) -> tuple[dict[str, Any], int]:
@@ -194,8 +212,15 @@ def selftest(backend: str | None, model: str | None, effort: str | None, keep: b
             st = prewalk_async.status(run)
         state = json.loads((run / "state.json").read_text(encoding="utf-8"))
         lines = (repo / "hello.txt").read_text(encoding="utf-8").splitlines()
+        review_path = run / "review.json"
+        review = json.loads(review_path.read_text(encoding="utf-8")) if review_path.exists() else {}
+        changed_paths = {entry["path"] for entry in review.get("overall", [])}
+        expected_second = "hello from mock builder turn 1" if b.id == "mock" else "hello from builder"
         checks = {"completed": st["status"] == "completed",
                   "file_changed": len(lines) >= 2,
+                  "first_edit_preserved": lines[:1] == ["first edit by navigator"],
+                  "builder_instruction_followed": lines == ["first edit by navigator", expected_second],
+                  "scope_preserved": changed_paths == {"hello.txt"},
                   "review_md": (run / "review.md").exists(),
                   "model_ok": not state.get("model_warning")}
         result.update(status=st["status"], checks=checks, model=state.get("model"),
@@ -216,7 +241,10 @@ def selftest(backend: str | None, model: str | None, effort: str | None, keep: b
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="prewalk", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
-    p = sub.add_parser("doctor", help="read-only readiness check + recommendation")
+    p = sub.add_parser("models", help="read-only list of currently usable Builder models")
+    p.add_argument("--json", action="store_true")
+    p.add_argument("--navigator-host", choices=bb.NAVIGATOR_HOSTS)
+    p = sub.add_parser("doctor", help="optional readiness diagnosis + recommendation")
     p.add_argument("--json", action="store_true")
     p.add_argument("--navigator-host", choices=bb.NAVIGATOR_HOSTS)
     p = sub.add_parser("setup", help="write ~/.prewalk/config.json (no secrets)")
@@ -231,6 +259,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--keep", action="store_true"); p.add_argument("--timeout", type=float, default=600)
     args = parser.parse_args(argv)
     try:
+        if args.command == "models":
+            report = available_models(args.navigator_host)
+            if args.json:
+                print(json.dumps(report, indent=2, ensure_ascii=False))
+            else:
+                for row in report["backends"]:
+                    effort = row["default_effort"] or "(not settable)"
+                    print(f"{row['backend']}: models={', '.join(row['models'])}; "
+                          f"default={row['default_model']}/{effort}; "
+                          f"efforts={', '.join(row['efforts']) or '(not settable)'}")
+                if not report["backends"]:
+                    print("No ready Builder models detected.")
+            return 0
         if args.command == "doctor":
             report, code = doctor(args.navigator_host)
             if args.json:

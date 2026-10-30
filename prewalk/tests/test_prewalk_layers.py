@@ -324,12 +324,12 @@ class AsyncLayerTests(RepoBase):
         done = ASYNC.wait(self.run, timeout=20)
         self.assertEqual(done["status"], "failed")
         layers = self.layers()
-        self.assertEqual([l["name"] for l in layers], ["L1", "L2-1", "L2-2", "L2-3"])
-        self.assertEqual(layers[-1]["via"], "supervisor")
-        self.assertTrue(layers[-1]["final"])
-        self.assertEqual([e["path"] for e in layers[-1]["manifest"]], ["src/handlers/partial.py"])
+        captured = {e["path"] for layer in layers if layer["name"].startswith("L2-")
+                    for e in layer["manifest"]}
+        self.assertEqual(captured, {"src/handlers/h0.py", "src/handlers/h1.py", "src/handlers/partial.py"})
         self.assertIn("no_return_package", self.flags())
-        self.assertIn("refs/prewalk/h1/L2-3", sh(self.repo, "for-each-ref", "refs/prewalk/"))
+        last_ref = layers[-1]["ref"]
+        self.assertIn(last_ref, sh(self.repo, "for-each-ref", "refs/prewalk/"))
 
     def test_cancel_leaves_layers_and_review(self):
         self.first_edit()

@@ -26,7 +26,7 @@ Legacy markers exist for compatibility with sessions and external manager script
 
 ## Select and validate the adapter
 
-**First run (no `~/.prewalk/config.json`) or when the Builder is not ready:** run `python3 <skill-dir>/scripts/prewalk.py doctor --navigator-host <your host>` (read-only). It lists the registered Builder backends ([references/backends.md](references/backends.md)), probes which CLIs are installed and logged in, and recommends a Builder on the same family as the Navigator on a weak model (for example Claude Navigator → `claude-code-sub` on `sonnet`; Codex → `codex-sub` on `gpt-6-luna`; Kimi → `kimi-sub` on `kimi-code/kimi-for-coding`). Automatic Track A recommendations require a subscription login, not an API-key login. Kimi Desktop OAuth is reused when `kimi provider list` reports a managed provider with `type=kimi` and `source=oauth`; run `kimi login` only when no such provider exists. Accept the recommendation with `python3 <skill-dir>/scripts/prewalk.py setup` and optionally confirm with `prewalk.py test`. If doctor exits 3, show its fallback hint and stop; never ask for or handle the credential yourself. A ready saved config is reused without asking again.
+**Discover models without a first-run gate:** run `python3 <skill-dir>/scripts/prewalk.py models --navigator-host <your host>` (read-only). It lists currently usable Builder backends, models, and effort choices from the registry in `scripts/builder_backends/` ([references/backends.md](references/backends.md)). It never writes config or launches a test. Do not require `doctor`, `setup`, `test`, or an existing `~/.prewalk/config.json` before Prewalk; those are optional diagnostics and saved-preference tools. A ready saved config may supply a Builder default, but is never a prerequisite.
 
 Adapter selection and capability validation happen before model/effort dispatch:
 
@@ -35,37 +35,30 @@ Adapter selection and capability validation happen before model/effort dispatch:
 3. Validate the capabilities the run requires: initial launch, resumable session, session identity, final-message extraction, permission boundary, and native artifact completeness. If a required capability is missing, stop and report it; do not invent a flag, session id, usage value, or final message.
 4. Record the Navigator host in `run.json` as `navigator_host` and the Builder adapter host id as `adapter_host`; pass the Builder adapter host id to the runtime adapter as `--host <host>`.
 
-The Builder backend list lives in one place, the registry in `scripts/builder_backends/` (`prewalk.py doctor` prints it); each backend maps to a runtime host for `prewalk_runtime.py inspect --host`, and adapter files under `adapters/` document those hosts. Never use a Navigator-class model (`opus`, `best`, `fable`, Codex Sol/Astra) as Builder; the registry rejects them. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
+Each backend maps to a runtime host for `prewalk_runtime.py inspect --host`, and adapter files under `adapters/` document those hosts. Never use a Navigator-class model (`opus`, `best`, `fable`, Codex Sol/Astra) as Builder; the registry rejects them. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
 
-## First-use connection setup
+## Connection setup only when needed
 
-For an orchestrated Navigator run, check whether the selected Builder adapter reports a ready managed executor (`prewalk.py doctor`) before the model/effort preflight. Ask connection questions only when that readiness is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
+Do not make connection setup a separate first-use phase. Start with model discovery and the model/effort preflight. If the selected backend cannot actually launch because authentication or endpoint configuration is missing, report that concrete error and offer the other available models or the backend's documented managed setup path. Never ask for credentials on every run, repeat a valid setup, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
 
-When setup is needed, group the questions in one prompt:
-
-1. Host-native authentication for Navigator, if the parent session has none.
-2. Builder provider or endpoint, using the selected adapter's documented default only when that is what the user wants.
-3. Credentials only through the host's secure prompt or stdin. Never echo them, and never put them in a handoff, progress file, log, or commit.
-4. Protocol or model metadata only when the host needs it to describe a custom connection.
-
-Apply changes only through the adapter's documented managed configuration path. Never hand-edit TOML, JSON, credentials, or runtime copies. A valid existing configuration is reused without asking again. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
+When setup is genuinely needed, ask only for the missing information through the host's secure mechanism. Never echo credentials or put them in a handoff, progress file, log, or commit. Apply changes only through the adapter's documented managed configuration path; never hand-edit TOML, JSON, credentials, or runtime copies. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
 
 ## Model and effort preflight
 
 For an orchestrated Navigator run, ask the user to confirm the model pairing before **Orient**. Use the host's ordinary question mechanism; structured questions are optional, and plain text is sufficient. Reuse values already supplied in the invocation and ask only for missing values. Do not ask again during executor execution, review, or resume from a phase marker.
 
-**Recommended defaults (Prewalk):** Navigator effort `high` (use `max` only when digging hard into an unclear root cause); Builder effort `medium`. Navigator decides; Builder follows the first-edit template — do not default Builder to `max`, because max mostly re-plans work that is already decided and burns tokens. Pure pattern expansion may use Builder `low`; repeated compile/test failures may raise Builder to `high`; escalate back to Navigator instead of jumping to Builder `max`.
+**Recommended defaults (Prewalk):** Navigator uses the current parent-session model and its current effective effort; Builder uses an available weak model with effort `medium`. Navigator decides; Builder follows the first-edit template — do not default Builder to `max`, because max mostly re-plans work that is already decided and burns tokens. Pure pattern expansion may use Builder `low`; repeated compile/test failures may raise Builder to `high`; escalate back to Navigator instead of jumping to Builder `max`.
 
 Before asking, load the last confirmed pairing with `python3 <skill-dir>/scripts/prewalk_prefs.py show --json` (file: `~/.prewalk/last-pairing.json`, overridable by `PREWALK_PREFS_PATH`). If a last pairing exists, offer **reuse last: &lt;navigator model/effort → builder model/effort&gt;** as the first option. If the user accepts reuse or **use defaults**, skip the four questions.
 
 Otherwise ask these four questions together, stating the recommended defaults in the prompt:
 
-1. Which model should Navigator use? Default: the current parent model.
-2. Which thinking effort should Navigator use? Recommended default: `high`.
-3. Which model should the Builder executor use? Default: the configured backend's weak model from `prewalk.py doctor` (for example `sonnet`, `gpt-6-luna`).
-4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`).
+1. Which model should Navigator use? Default: the current parent-session model.
+2. Which thinking effort should Navigator use? Default: the current parent session's effective effort, not a new global default.
+3. Which model should the Builder executor use? Default: an available weak model from `prewalk.py models` (for example `sonnet`, `gpt-6-luna`, or `kimi-code/kimi-for-coding`).
+4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`) when the selected model supports it. If `prewalk.py models` reports no effort control, state that effort is not settable and record `null`; do not claim `medium` was applied.
 
-Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator high decides; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.
+Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator keeps the current session model and effort; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.
 
 After the user confirms a pairing, persist it with `python3 <skill-dir>/scripts/prewalk_prefs.py save ...` (non-secret fields only: models and efforts). Next orchestrated run should offer that pairing for reuse.
 

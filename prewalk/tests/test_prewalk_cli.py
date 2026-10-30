@@ -43,6 +43,25 @@ class CliCase(unittest.TestCase):
         return code, out.getvalue(), err.getvalue()
 
 
+class ModelsTests(CliCase):
+    def test_models_lists_ready_choices_without_writing_config(self):
+        os.environ["FAKE_KIMI_AUTH"] = "oauth"
+        code, out, _ = self.cli("models", "--json", "--navigator-host", "kimi")
+        report = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertFalse(self.home.exists())
+        kimi = next(row for row in report["backends"] if row["backend"] == "kimi-sub")
+        self.assertEqual(kimi["models"], ["kimi-code/kimi-for-coding", "kimi-code/k3-256k"])
+        self.assertEqual(kimi["default_model"], "kimi-code/kimi-for-coding")
+        self.assertIsNone(kimi["default_effort"])
+
+    def test_models_text_output(self):
+        code, out, _ = self.cli("models", "--navigator-host", "claude-code")
+        self.assertEqual(code, 0)
+        self.assertIn("claude-code-sub: models=sonnet, haiku", out)
+        self.assertIn("default=sonnet/medium", out)
+
+
 class DoctorTests(CliCase):
     def test_same_family_recommendation_json(self):
         code, out, _ = self.cli("doctor", "--json", "--navigator-host", "codex")
@@ -99,6 +118,11 @@ class NothingReadyTests(CliCase):
         self.assertIn("Then run: prewalk doctor", out)
         code, out, _ = self.cli("doctor", "--json")
         self.assertEqual((code, json.loads(out)["recommended"]), (3, None))
+
+    def test_models_empty_is_informational_not_a_gate(self):
+        code, out, _ = self.cli("models", "--json", "--navigator-host", "kimi")
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(out)["backends"], [])
 
 
 class LoggedOutTests(CliCase):

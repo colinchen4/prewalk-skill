@@ -11,14 +11,14 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_NAVIGATOR_EFFORT = "high"
+DEFAULT_NAVIGATOR_EFFORT = None
 DEFAULT_BUILDER_EFFORT = "medium"
 ALLOWED_EFFORTS = frozenset({"minimal", "low", "medium", "high", "xhigh", "max"})
 PREFS_ENV = "PREWALK_PREFS_PATH"
 DEFAULT_PREFS_RELATIVE = Path(".prewalk") / "last-pairing.json"
 RECOMMENDATION_NOTE = (
-    "Navigator high decides; Builder medium follows the first-edit template — "
-    "do not default Builder to max."
+    "Navigator uses the current session model and effort; Builder medium follows "
+    "the first-edit template — do not default Builder to max."
 )
 
 
@@ -60,9 +60,9 @@ def validate_pairing(raw: dict[str, Any]) -> dict[str, Any]:
         raise PrefsError("navigator_model must be a string or null")
     if builder_model is not None and not isinstance(builder_model, str):
         raise PrefsError("builder_model must be a string or null")
-    navigator_effort = normalize_effort(
-        str(raw.get("navigator_effort") or DEFAULT_NAVIGATOR_EFFORT),
-        role="navigator",
+    navigator_effort = (
+        normalize_effort(str(raw["navigator_effort"]), role="navigator")
+        if raw.get("navigator_effort") else None
     )
     builder_effort = normalize_effort(
         str(raw.get("builder_effort") or DEFAULT_BUILDER_EFFORT),
@@ -114,9 +114,10 @@ def save_last_pairing(pairing: dict[str, Any], path: Path | None = None) -> Path
 
 def format_reuse_line(pairing: dict[str, Any]) -> str:
     nav_model = pairing.get("navigator_model") or "current-parent"
+    nav_effort = pairing["navigator_effort"] or "current-session"
     bld_model = pairing.get("builder_model") or "adapter-default"
     return (
-        f"reuse last: {nav_model}/{pairing['navigator_effort']} "
+        f"reuse last: {nav_model}/{nav_effort} "
         f"→ {bld_model}/{pairing['builder_effort']}"
     )
 
@@ -125,7 +126,7 @@ def format_preflight_prompt(last: dict[str, Any] | None = None) -> str:
     defaults = recommended_defaults()
     lines = [
         "Prewalk model/effort preflight",
-        f"Recommended: Navigator effort {defaults['navigator_effort']}; "
+        f"Recommended: Navigator effort {defaults['navigator_effort'] or 'current-session'}; "
         f"Builder effort {defaults['builder_effort']}.",
         RECOMMENDATION_NOTE,
         "Accept 'use defaults' for all four, or answer each question.",

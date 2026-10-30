@@ -19,15 +19,16 @@ Track A uses the user's own logged-in official CLI and never an API key: each ba
 - Codex: Sol and Astra (about 1/20 of Luna's quota).
 - Kimi: `kimi-for-coding-highspeed` (3x quota).
 
-## First run
+## Model discovery and optional diagnostics
 
 ```sh
-python3 scripts/prewalk.py doctor                 # read-only; --json; --navigator-host claude-code|codex|kimi|...
-python3 scripts/prewalk.py setup                  # accept the recommendation (or --backend/--model/--effort)
-python3 scripts/prewalk.py test                   # one round trip in a throwaway git repo
+python3 scripts/prewalk.py models --navigator-host kimi   # read-only usable model/effort choices; no config writes
+python3 scripts/prewalk.py doctor                         # optional readiness diagnosis
+python3 scripts/prewalk.py setup                          # optional saved Builder default
+python3 scripts/prewalk.py test                           # optional round trip in a throwaway git repo
 ```
 
-Navigator host: `--navigator-host`, else `PREWALK_HOST`, else auto-detect. Pairing: saved config if still ready → same family as Navigator → other ready Track A → ready Track B → fallback hint, exit 3. Automatic Track A recommendations require verified subscription billing, not an API-key login. Kimi accepts a managed provider reported by `kimi provider list` with `type=kimi` and `source=oauth`, so an existing Desktop login can be reused without another login. If no managed OAuth provider is listed, run `kimi login` or use another backend. Same-family Builders share the Navigator's plan quota; the weak model is what keeps that cheap. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
+There is no mandatory first-run setup. Navigator defaults to the current session's model and effective effort; Builder is chosen from `models` with `medium` effort when supported, otherwise effort is recorded as `null`. `models` includes implemented, installed, ready backends and never returns API-key Track A logins as subscription choices. Kimi accepts a managed provider reported by `kimi provider list` with `type=kimi` and `source=oauth`, so an existing Desktop login can be reused without another login. If no managed OAuth provider is listed, choose another backend or run `kimi login` only when needed. Builder concurrency is 1 by default (`setup --max-concurrency 2` at most).
 
 ## Effort
 

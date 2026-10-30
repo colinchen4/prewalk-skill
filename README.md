@@ -48,17 +48,15 @@ The skill is self-contained for orchestration. The runtime adapter is stdlib-onl
 
 ## Setup
 
-Quick start (picks a Builder on a weak model inside your existing subscription, no API key):
+Quick start is read-only model discovery, not a setup wizard:
 
 ```sh
-python3 prewalk/scripts/prewalk.py doctor     # read-only: which CLIs are installed and logged in + recommendation
-python3 prewalk/scripts/prewalk.py setup      # accept it -> ~/.prewalk/config.json (no secrets)
-python3 prewalk/scripts/prewalk.py test       # one Builder round trip in a throwaway git repo
+python3 prewalk/scripts/prewalk.py models --navigator-host kimi  # list usable Builder models/efforts; no config writes
 ```
 
-Claude Code Navigator → Builder `claude -p --model sonnet`; Codex → `codex exec -m gpt-6-luna`; Kimi → `kimi -m kimi-code/kimi-for-coding`. Automatic Track A recommendations require a subscription login, never an API-key login. Kimi Desktop OAuth is reused when `kimi provider list` reports a managed provider with `type=kimi` and `source=oauth`; run `kimi login` only when no such provider exists. If nothing is ready, doctor prints how to log in (or how to use an open agent with an API key) and exits 3. Backends, blocked models, effort mapping, and what is not yet live-verified: [`prewalk/references/backends.md`](prewalk/references/backends.md).
+Prewalk then asks one model/effort preflight: Navigator defaults to the current session's model and effective effort; Builder defaults to an available weak model with `medium` effort when supported, otherwise effort is reported as not settable. `doctor`, `setup`, and `test` are optional diagnostics, not prerequisites. A ready saved config may supply a Builder default but is never required. Backends, blocked models, effort mapping, and what is not yet live-verified: [`prewalk/references/backends.md`](prewalk/references/backends.md).
 
-Check the selected adapter's readiness or status before the model/effort preflight. Ask connection questions only when that status is missing or incomplete, or when the user asks to change the endpoint. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
+Handle connection setup only if the selected backend actually fails to launch because authentication or endpoint configuration is missing. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
 
 Configuring a provider or endpoint is not proof that a requested model or effort works. Keep the core preflight and validate the actual launch values.
 
