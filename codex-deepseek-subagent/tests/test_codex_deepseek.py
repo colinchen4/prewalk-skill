@@ -277,6 +277,18 @@ class DeepSeekManagerTests(unittest.TestCase):
         MANAGER.apply_effort(None)  # restore default for later tests
         self.assertEqual(MANAGER.EFFORT, "medium")
 
+    def test_saved_effort_is_reused_across_commands(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            paths = MANAGER.resolve_paths(temp_dir)
+            paths.agent.parent.mkdir(parents=True, exist_ok=True)
+            MANAGER.apply_effort("high")
+            paths.agent.write_text(MANAGER.expected_agent_text(), encoding="utf-8")
+            MANAGER.apply_effort(None)
+            with mock.patch.dict(os.environ, {MANAGER.EFFORT_ENV: ""}, clear=False):
+                self.assertEqual(MANAGER.apply_saved_effort(paths), "high")
+                self.assertEqual(MANAGER.apply_saved_effort(paths, "low"), "low")
+        MANAGER.apply_effort(None)
+
     def test_invalid_effort_rejected(self):
         with self.assertRaises(MANAGER.ManagerError) as ctx:
             MANAGER.normalize_effort("ultra")

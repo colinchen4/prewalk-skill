@@ -180,6 +180,21 @@ def render_brief(brief: dict[str, Any], paths: dict[str, Path], first_edit: str 
 def _pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         done, _ = os.waitpid(pid, os.WNOHANG)
         if done == pid:
@@ -307,8 +322,13 @@ def supervise(run_dir: Path, turn: int) -> int:
     seen = len(read_tail(paths["progress"]))  # before Popen: no Builder line is missed
     try:
         with open(paths["events"], "wb") as out, open(paths["err"], "wb") as err:
-            proc = subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=out, stderr=err,
-                                    start_new_session=True)
+            try:
+                proc = subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=out, stderr=err,
+                                        start_new_session=True)
+            except OSError as exc:
+                state.update(status="failed", error=f"could not start Builder: {exc}", ended_at=_now())
+                _write_json(paths["state"], state)
+                return 0
             state.update(status="running", supervisor_pid=os.getpid(), builder_pid=proc.pid,
                          started_at=_now())
             _write_json(paths["state"], state)
@@ -417,7 +437,7 @@ def cancel(run_dir: Path, timeout: float = 10.0) -> dict[str, Any]:
             if state["status"] in TERMINAL:
                 return {"ok": True, "status": state["status"]}
             time.sleep(0.05)
-        if sig == signal.SIGKILL or not hasattr(signal, "SIGKILL"):
+        if not hasattr(signal, "SIGKILL") or sig == signal.SIGKILL:
             return {"ok": False, "status": state["status"], "note": "supervisor has not confirmed"}
         sig = signal.SIGKILL
 

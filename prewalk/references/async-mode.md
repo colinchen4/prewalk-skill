@@ -22,7 +22,13 @@ A detached supervisor runs the Builder, writes `state.json`, appends `started`/t
 
 ## Git layers (first edit in, evidence out)
 
-When `cwd` is a git worktree (opt out with `"layers": false`), launch snapshots the worktree as layer **L1** over **L0 = HEAD** and appends to `brief.txt` the L1 manifest (A/M/D, +/-), a capped `git diff L0 L1` (`first_edit_diff_chars`, default 6000, with a truncation note pointing at `first-edit.patch`), and the fixed rule that L1 is the template layer. Snapshot L1 yourself first with `prewalk_layers.py snapshot --layer L1 --message "..."` to name it; launch then reuses it.
+When `cwd` is a git worktree (opt out with `"layers": false`), capture **L0 before the Navigator's first edit** so inherited dirty-worktree changes have their own baseline:
+
+```sh
+python scripts/prewalk_layers.py snapshot --run-dir <run-dir> --handoff-id h1 --cwd <workspace> --layer L0 --message "inherited baseline"
+```
+
+Launch then snapshots **L1** over L0 and appends to `brief.txt` the L1 manifest (A/M/D, +/-), a capped `git diff L0 L1` (`first_edit_diff_chars`, default 6000, with a truncation note pointing at `first-edit.patch`), and the fixed rule that L1 is the template layer. To name L1 yourself, snapshot it after the first edit with `prewalk_layers.py snapshot --layer L1 --message "..."`; launch reuses it. Launch rejects a missing L0 rather than misattributing inherited changes to Navigator. `review.md`/`review.json` report inherited changes separately from the task diff.
 
 The supervisor (not the Builder) snapshots **L2-<n>** after each batch of new Builder progress lines and once more on exit (crash and cancel included), then writes `review.md`/`review.json` and puts the path in `state.json` and `status` (`review_report`). Snapshots use a temp `GIT_INDEX_FILE` seeded from a copy of the real index, so only changed or untracked files are rehashed and `.gitignore` is honoured; HEAD, branch, the real index and the worktree are never touched. Only `refs/prewalk/<handoff-id>/*` are written. Regenerate with `prewalk_layers.py review-report --run-dir D` (alias `layer-diff`); drop the refs with `prewalk_layers.py cleanup --handoff-id <id> --run-dir D` (objects go with `git gc`).
 
