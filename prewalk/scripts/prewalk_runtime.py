@@ -26,6 +26,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from builder_backends.base import RUNTIME_HOSTS  # noqa: E402  (single host list)
+
 
 SCHEMA_VERSION = 2
 
@@ -1625,7 +1628,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument(
         "--host",
         required=True,
-        choices=("kimi", "codex", "claude-code", "dsh", "generic"),
+        choices=RUNTIME_HOSTS,
     )
     inspect_parser.add_argument("--builder-turn", required=True, type=_positive_int)
     inspect_parser.add_argument("--events", required=True, type=Path)
