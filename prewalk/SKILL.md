@@ -26,6 +26,8 @@ Legacy markers exist for compatibility with sessions and external manager script
 
 ## Select and validate the adapter
 
+**First run (no `~/.prewalk/config.json`) or when the Builder is not ready:** run `python3 <skill-dir>/scripts/prewalk.py doctor --navigator-host <your host>` (read-only). It lists the registered Builder backends ([references/backends.md](references/backends.md)), probes which CLIs are installed and logged in, and recommends a Builder on the same family as the Navigator on a weak model (for example Claude Navigator → `claude-code-sub` on `sonnet`; Codex → `codex-sub` on `gpt-6-luna`). Accept the recommendation with `python3 <skill-dir>/scripts/prewalk.py setup` and optionally confirm with `prewalk.py test`. If doctor exits 3, show its fallback hint (log in to a subscription CLI, or configure an open agent with an API key) and stop; never ask for or handle the credential yourself. A ready saved config is reused without asking again.
+
 Adapter selection and capability validation happen before model/effort dispatch:
 
 1. Read [adapters/README.md](adapters/README.md) and the selected `adapters/<host>.md`.
@@ -33,11 +35,11 @@ Adapter selection and capability validation happen before model/effort dispatch:
 3. Validate the capabilities the run requires: initial launch, resumable session, session identity, final-message extraction, permission boundary, and native artifact completeness. If a required capability is missing, stop and report it; do not invent a flag, session id, usage value, or final message.
 4. Record the Navigator host in `run.json` as `navigator_host` and the Builder adapter host id as `adapter_host`; pass the Builder adapter host id to the runtime adapter as `--host <host>`.
 
-Built-in adapter files cover `codex`, `kimi`, `claude-code`, and `dsh`. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
+The Builder backend list lives in one place, the registry in `scripts/builder_backends/` (`prewalk.py doctor` prints it); each backend maps to a runtime host for `prewalk_runtime.py inspect --host`, and adapter files under `adapters/` document those hosts. Never use a Navigator-class model (`opus`, `best`, `fable`, Codex Sol/Astra) as Builder; the registry rejects them. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
 
 ## First-use connection setup
 
-For an orchestrated Navigator run, check whether the selected Builder adapter reports a ready managed executor before the model/effort preflight. Ask connection questions only when that readiness is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
+For an orchestrated Navigator run, check whether the selected Builder adapter reports a ready managed executor (`prewalk.py doctor`) before the model/effort preflight. Ask connection questions only when that readiness is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
 
 When setup is needed, group the questions in one prompt:
 
@@ -60,7 +62,7 @@ Otherwise ask these four questions together, stating the recommended defaults in
 
 1. Which model should Navigator use? Default: the current parent model.
 2. Which thinking effort should Navigator use? Recommended default: `high`.
-3. Which model should the Builder executor use? Default: the selected adapter's managed executor model.
+3. Which model should the Builder executor use? Default: the configured backend's weak model from `prewalk.py doctor` (for example `sonnet`, `gpt-6-luna`).
 4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`).
 
 Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator high decides; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.

@@ -48,6 +48,16 @@ The skill is self-contained for orchestration. The runtime adapter is stdlib-onl
 
 ## Setup
 
+Quick start (picks a Builder on a weak model inside your existing subscription, no API key):
+
+```sh
+python3 prewalk/scripts/prewalk.py doctor     # read-only: which CLIs are installed and logged in + recommendation
+python3 prewalk/scripts/prewalk.py setup      # accept it -> ~/.prewalk/config.json (no secrets)
+python3 prewalk/scripts/prewalk.py test       # one Builder round trip in a throwaway git repo
+```
+
+Claude Code Navigator → Builder `claude -p --model sonnet`; Codex → `codex exec -m gpt-6-luna`; Kimi → `kimi -m kimi-code/kimi-for-coding`. If nothing is ready, doctor prints how to log in (or how to use an open agent with an API key) and exits 3. Backends, blocked models, effort mapping, and what is not yet live-verified: [`prewalk/references/backends.md`](prewalk/references/backends.md).
+
 Check the selected adapter's readiness or status before the model/effort preflight. Ask connection questions only when that status is missing or incomplete, or when the user asks to change the endpoint. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
 
 Configuring a provider or endpoint is not proof that a requested model or effort works. Keep the core preflight and validate the actual launch values.
