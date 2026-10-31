@@ -23,9 +23,15 @@ SKILL = Path(__file__).parents[1] / "SKILL.md"
 class PrewalkPrefsTests(unittest.TestCase):
     def test_recommended_defaults(self):
         defaults = PREFS.recommended_defaults()
-        self.assertEqual(defaults["navigator_effort"], "high")
+        self.assertIsNone(defaults["navigator_effort"])
         self.assertEqual(defaults["builder_effort"], "medium")
+        self.assertIn("current session model and effort", defaults["note"])
         self.assertIn("do not default Builder to max", defaults["note"])
+
+    def test_default_pairing_reuses_current_navigator_effort(self):
+        pairing = PREFS.validate_pairing({})
+        self.assertIsNone(pairing["navigator_effort"])
+        self.assertIn("current-parent/current-session", PREFS.format_reuse_line(pairing))
 
     def test_save_and_load_roundtrip(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -112,9 +118,12 @@ class PrewalkPrefsTests(unittest.TestCase):
     def test_skill_preflight_wording(self):
         text = SKILL.read_text(encoding="utf-8")
         self.assertIn("Recommended defaults (Prewalk)", text)
-        self.assertIn("Navigator effort `high`", text)
-        self.assertIn("Builder effort `medium`", text)
+        self.assertIn("current parent-session model", text)
+        self.assertIn("current parent session's effective effort", text)
+        self.assertIn("effort `medium`", text)
         self.assertIn("do not default Builder to `max`", text)
+        self.assertIn("prewalk.py models", text)
+        self.assertNotIn("First-use connection setup", text)
         self.assertIn("prewalk_prefs.py", text)
         self.assertIn("reuse last:", text)
         self.assertIn("use defaults", text)

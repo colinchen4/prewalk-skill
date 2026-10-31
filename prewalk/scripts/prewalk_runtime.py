@@ -22,9 +22,13 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from builder_backends.base import RUNTIME_HOSTS  # noqa: E402  (single host list)
 
 
 SCHEMA_VERSION = 2
@@ -97,6 +101,29 @@ def _iso_from_millis(value: Any) -> str | None:
     return stamp.isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+def _read_text_with_retry(path: Path, encoding: str = "utf-8") -> str:
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            return Path(path).read_text(encoding=encoding)
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
+def _replace_with_retry(temp_name: str, path: Path) -> None:
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            os.replace(temp_name, path)
+            return
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
+
+
 def _atomic_write_text(path: Path, text: str) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -108,7 +135,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temp_name, path)
+        _replace_with_retry(temp_name, path)
     except BaseException:
         try:
             os.unlink(temp_name)
@@ -1625,7 +1652,7 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser.add_argument(
         "--host",
         required=True,
-        choices=("kimi", "codex", "claude-code", "dsh", "generic"),
+        choices=RUNTIME_HOSTS,
     )
     inspect_parser.add_argument("--builder-turn", required=True, type=_positive_int)
     inspect_parser.add_argument("--events", required=True, type=Path)

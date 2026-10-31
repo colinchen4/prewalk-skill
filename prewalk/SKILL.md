@@ -26,6 +26,8 @@ Legacy markers exist for compatibility with sessions and external manager script
 
 ## Select and validate the adapter
 
+**Discover models without a first-run gate:** run `python3 <skill-dir>/scripts/prewalk.py models --navigator-host <your host>` (read-only). It lists currently usable Builder backends, models, and effort choices from the registry in `scripts/builder_backends/` ([references/backends.md](references/backends.md)). It never writes config or launches a test. Do not require `doctor`, `setup`, `test`, or an existing `~/.prewalk/config.json` before Prewalk; those are optional diagnostics and saved-preference tools. A ready saved config may supply a Builder default, but is never a prerequisite.
+
 Adapter selection and capability validation happen before model/effort dispatch:
 
 1. Read [adapters/README.md](adapters/README.md) and the selected `adapters/<host>.md`.
@@ -33,37 +35,30 @@ Adapter selection and capability validation happen before model/effort dispatch:
 3. Validate the capabilities the run requires: initial launch, resumable session, session identity, final-message extraction, permission boundary, and native artifact completeness. If a required capability is missing, stop and report it; do not invent a flag, session id, usage value, or final message.
 4. Record the Navigator host in `run.json` as `navigator_host` and the Builder adapter host id as `adapter_host`; pass the Builder adapter host id to the runtime adapter as `--host <host>`.
 
-Built-in adapter files cover `codex`, `kimi`, `claude-code`, and `dsh`. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
+Each backend maps to a runtime host for `prewalk_runtime.py inspect --host`, and adapter files under `adapters/` document those hosts. Never use a Navigator-class model (`opus`, `best`, `fable`, Codex Sol/Astra) as Builder; the registry rejects them. For another harness, the host needs a thin shim that emits the normalized envelope in [adapters/README.md](adapters/README.md); copying `SKILL.md` into a directory is not proof of support. Do not infer support for a harness merely because it can execute a prompt, and do not claim an adapter is live-tested when only fixtures exist.
 
-## First-use connection setup
+## Connection setup only when needed
 
-For an orchestrated Navigator run, check whether the selected Builder adapter reports a ready managed executor before the model/effort preflight. Ask connection questions only when that readiness is missing or incomplete, or when the user asks to change the endpoint. Do not ask for credentials on every run, repeat a setup that is already valid, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
+Do not make connection setup a separate first-use phase. Start with model discovery and the model/effort preflight. If the selected backend cannot actually launch because authentication or endpoint configuration is missing, report that concrete error and offer the other available models or the backend's documented managed setup path. Never ask for credentials on every run, repeat a valid setup, or run connection setup during Builder execution, Navigator review, or resume from a phase marker.
 
-When setup is needed, group the questions in one prompt:
-
-1. Host-native authentication for Navigator, if the parent session has none.
-2. Builder provider or endpoint, using the selected adapter's documented default only when that is what the user wants.
-3. Credentials only through the host's secure prompt or stdin. Never echo them, and never put them in a handoff, progress file, log, or commit.
-4. Protocol or model metadata only when the host needs it to describe a custom connection.
-
-Apply changes only through the adapter's documented managed configuration path. Never hand-edit TOML, JSON, credentials, or runtime copies. A valid existing configuration is reused without asking again. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
+When setup is genuinely needed, ask only for the missing information through the host's secure mechanism. Never echo credentials or put them in a handoff, progress file, log, or commit. Apply changes only through the adapter's documented managed configuration path; never hand-edit TOML, JSON, credentials, or runtime copies. Configuring a provider or endpoint is not proof that a requested model or effort works: keep the preflight and its validation below.
 
 ## Model and effort preflight
 
 For an orchestrated Navigator run, ask the user to confirm the model pairing before **Orient**. Use the host's ordinary question mechanism; structured questions are optional, and plain text is sufficient. Reuse values already supplied in the invocation and ask only for missing values. Do not ask again during executor execution, review, or resume from a phase marker.
 
-**Recommended defaults (Prewalk):** Navigator effort `high` (use `max` only when digging hard into an unclear root cause); Builder effort `medium`. Navigator decides; Builder follows the first-edit template — do not default Builder to `max`, because max mostly re-plans work that is already decided and burns tokens. Pure pattern expansion may use Builder `low`; repeated compile/test failures may raise Builder to `high`; escalate back to Navigator instead of jumping to Builder `max`.
+**Recommended defaults (Prewalk):** Navigator uses the current parent-session model and its current effective effort; Builder uses an available weak model with effort `medium`. Navigator decides; Builder follows the first-edit template — do not default Builder to `max`, because max mostly re-plans work that is already decided and burns tokens. Pure pattern expansion may use Builder `low`; repeated compile/test failures may raise Builder to `high`; escalate back to Navigator instead of jumping to Builder `max`.
 
 Before asking, load the last confirmed pairing with `python3 <skill-dir>/scripts/prewalk_prefs.py show --json` (file: `~/.prewalk/last-pairing.json`, overridable by `PREWALK_PREFS_PATH`). If a last pairing exists, offer **reuse last: &lt;navigator model/effort → builder model/effort&gt;** as the first option. If the user accepts reuse or **use defaults**, skip the four questions.
 
 Otherwise ask these four questions together, stating the recommended defaults in the prompt:
 
-1. Which model should Navigator use? Default: the current parent model.
-2. Which thinking effort should Navigator use? Recommended default: `high`.
-3. Which model should the Builder executor use? Default: the selected adapter's managed executor model.
-4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`).
+1. Which model should Navigator use? Default: the current parent-session model.
+2. Which thinking effort should Navigator use? Default: the current parent session's effective effort, not a new global default.
+3. Which model should the Builder executor use? Default: an available weak model from `prewalk.py models` (for example `sonnet`, `gpt-6-luna`, or `kimi-code/kimi-for-coding`).
+4. Which thinking effort should the Builder executor use? Recommended default: `medium` (not `max`) when the selected model supports it. If `prewalk.py models` reports no effort control, state that effort is not settable and record `null`; do not claim `medium` was applied.
 
-Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator high decides; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.
+Accept **use defaults** as the answer to all four. One-liner to show the user: "Navigator keeps the current session model and effort; Builder medium follows the template — usually skip Builder max." If the host cannot ask questions, use the recommended defaults (or the last saved pairing when present) and report them; do not block an unattended run merely because the prompt is unavailable.
 
 After the user confirms a pairing, persist it with `python3 <skill-dir>/scripts/prewalk_prefs.py save ...` (non-secret fields only: models and efforts). Next orchestrated run should offer that pairing for reuse.
 
@@ -140,33 +135,44 @@ Create a TODO list using the task's plan or TODO mechanism:
 - Keep focused and broader regression verification as explicit items when appropriate.
 - Make the first implementation item the smallest coherent slice that demonstrates the intended pattern.
 
-### Land the first credible edit
+### Classify and write the plan before starting Builder
 
-Make exactly one coherent implementation edit. It may include inseparable adjacent hunks or files, but must represent one atomic slice. Inspect its diff. Run only a fast syntax, compile, or focused check when needed to prove the edit is not malformed. Do not debug onward or start the second implementation step in Navigator.
+Do not start any Builder process for exploration. Classify after Navigator has enough deterministic evidence:
+
+- `brief_only`: mechanical remaining work with verification; no Navigator code edit.
+- `sample_guided`: exactly one coherent difficult slice needs a Navigator L1 sample; extend it with Builder.
+- `navigator_only`: judgment dominates or verification is unavailable; finish directly without Builder.
+
+Read [builder-fusion.md](references/builder-fusion.md) and write `plan.json` with `prewalk_plan.py create`, including goal, scope, acceptance, and independent validation commands. `navigator_only` needs no Builder plan or launch. For `sample_guided`, capture L0 before editing, land exactly one coherent L1 sample, inspect its complete diff, and retain `first-edit.patch`. Do not debug onward or start a second implementation step in Navigator.
 
 ### Dispatch at the Builder boundary
 
-Read [handoff-format.md](references/handoff-format.md), [progress-format.md](references/progress-format.md), [session-continuity.md](references/session-continuity.md), [adapters/README.md](adapters/README.md), and the selected `adapters/<host>.md`, then populate the **Navigator to Builder** template entirely from observed evidence. Include the requested and verified model/effort selection, current TODO statuses, the first edit, the decisions Navigator retained, inherited worktree conditions, commands, failures, risks, visual facts when applicable, and the next validation.
-
-Allocate one run directory outside the repository containing the full handoff package, `run.json`, `progress.jsonl`, and per-turn artifacts (`turn-001-events.jsonl`, `turn-001.err`, `turn-001-final.txt`, and cumulative `usage.json`). Give their absolute paths in the handoff's `PROGRESS CHANNEL` section. `run.json` holds only non-secret routing state: `HANDOFF_ID`, Navigator host (`navigator_host`), Builder adapter host (`adapter_host`), Builder session id once observed, repository/worktree, branch, model/effort, permission boundary, next turn number, and artifact paths. Do not put credentials, prompts, or conversation content in it.
-
-When the adapter reports the executor surface ready, create a short unique `HANDOFF_ID`, write the populated handoff package to the run directory, and launch through that adapter's documented initial command. Capture the native event stream and stderr into the turn artifacts. Do not implement in parallel or ask the user to copy the prompt.
-
-After the process exits, run the installed runtime adapter against that turn:
+For a persistent backend, allocate the run directory outside the source worktree and use the persistent protocol. `kimi-sub` uses ACP over stdio; other backends that lack a persistent driver must fail explicitly or use the documented legacy path with the non-persistent limitation stated.
 
 ```sh
-python "<installed-prewalk>/scripts/prewalk_runtime.py" inspect --host "<adapter-host>" --builder-turn 1 --events "<run-dir>/turn-001-events.jsonl" --final-message "<run-dir>/turn-001-final.txt" --usage "<run-dir>/usage.json"
+python "<installed-prewalk>/scripts/prewalk_builder.py" launch --run-dir "<run-dir>" --plan "<run-dir>/plan.json" --backend kimi-sub
+python "<installed-prewalk>/scripts/prewalk_builder.py" status --run-dir "<run-dir>"
+python "<installed-prewalk>/scripts/prewalk_builder.py" execute --run-dir "<run-dir>" --text "<short execute delta>"
+python "<installed-prewalk>/scripts/prewalk_builder.py" review --run-dir "<run-dir>"
 ```
 
-Require the adapter-defined process success, the runtime-extracted session id, and the runtime-extracted final message. Record the session id in `run.json` for later turns. `usage.json` is cumulative schema_version 2 state: `calls` holds raw model-call records, `turns` holds one aggregate per Builder turn, and the same file is passed to later turns. The runtime reports provider usage and cost only when the host stream actually contains them; missing usage means `unavailable`, not zero. Treat usage as observability evidence, never as proof of quality.
+Wait for `AWAITING_NAVIGATOR` before `execute`; this is a live wait in the same PID/session, not a new Builder process. The supervisor creates an isolated worktree based on L1 when present, otherwise L0. It retains full diffs, independently runs the plan's validation commands, and writes `builder-review.patch/json` plus `validation/` records. Do not read Builder's prose summary or treat it as evidence.
 
-Report the run directory, the background task id when the launch provides one, and where status can be inspected. While the parent turn is active, take a natural non-blocking process/output snapshot at checkpoints and read only the new tail of `progress.jsonl`; mirror the latest verified high-level state into the parent TODO or a concise progress note. Do not busy-poll, and do not treat self-reported progress as final proof: the returned package and the actual diff still decide the outcome.
+Plans, indexes, patches, and continuations use content hashes so identical content is not rebuilt or rewritten. Every prompt starts with the stable `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY` prefix; only phase instructions and deltas vary. Builder environments strip other providers' credentials and model overrides while preserving Desktop OAuth configuration. The supervisor records executable path/size/SHA256 and ACP `currentValue` model evidence, and rechecks integrity before execute/approve. Hash evidence proves the binary did not change during the run, not vendor authenticity. Usage is recorded per role when the host exposes it; missing usage is `unavailable` or `not_collected`, never zero or proof of model identity.
 
-After the executor process finishes, require its runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted) and the same `HANDOFF_ID`. If the process failed before producing a turn (nonzero exit, auth or provider error, empty output), treat the result as a routing failure: do not claim execution or enter review, preserve the first edit, return the original copy-ready handoff, and run the adapter's documented repair/diagnostic step. If repository evidence shows executor work occurred but only the return package is malformed, reconstruct the changed-path and validation inventory and proceed to Phase C. In all successful cases, inspect the actual worktree and treat the package as navigation context, not proof.
+Navigator reviews the actual patch and validation evidence, then explicitly approves or discards. Approval runs `git apply --check` before applying `base..final` to the original worktree; nothing merges automatically. Failed worktrees remain for diagnosis until Navigator explicitly discards or salvages them.
+
+```sh
+python "<installed-prewalk>/scripts/prewalk_builder.py" approve --run-dir "<run-dir>"
+# or, after a deliberate decision:
+python "<installed-prewalk>/scripts/prewalk_builder.py" discard --run-dir "<run-dir>"
+```
+
+For corrections, send another short `execute` delta to the same live Builder. For model/effort changes, provide a real compaction id and use `route --compaction-id <id>` so the ACP session and PID stay intact and `routes.jsonl` records the reason. Do not switch models on the first failure or send keepalive prompts.
 
 ### Optional async mode
 
-Serial blocking dispatch above is the default. Only when the user asks for it, or Navigator has independent work while Builder runs, follow [async-mode.md](references/async-mode.md) instead: launch with a short brief through `scripts/prewalk_async.py`, keep working, read only the new progress tail with `status --after`, redirect with `steer`, stop with `cancel`. Final review rules are unchanged.
+Serial blocking dispatch above is the default. Only when the user asks for it, or Navigator has independent work while Builder runs, follow [async-mode.md](references/async-mode.md) instead: before the first edit, capture the inherited worktree as L0 with `prewalk_layers.py snapshot --layer L0`; then make the first edit and launch with a short brief through `scripts/prewalk_async.py`. Keep working, read only the new progress tail with `status --after`, redirect with `steer`, stop with `cancel`. Final review rules are unchanged.
 
 ### Resume the Builder session
 
@@ -199,7 +205,9 @@ Before finishing:
 - Run the strongest practical focused and regression validation.
 - Mark TODO items accurately; leave unresolved work explicit.
 
-### Return to Navigator
+### Return to Navigator (legacy one-shot path)
+
+Persistent Builders return process metadata, complete diffs, and validation artifacts; they do not return a prose acceptance package. The following applies only to a legacy one-shot adapter.
 
 Read [handoff-format.md](references/handoff-format.md). Return a concise completion status followed by one fenced, copy-ready package using the **Builder to Navigator** template. Generate it whether execution completed, became blocked, or was escalated. The package begins with `PREWALK_PHASE: NAVIGATOR_REVIEW`; the legacy `PREWALK_PHASE: SOL_REVIEW` remains accepted during migration.
 
@@ -209,7 +217,7 @@ Include the original objective, inherited first edit, complete changed-path inve
 
 ## Phase C: Navigator review
 
-Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Inspect the actual worktree and diff; do not trust the executor summary alone. In async mode with git layers, start from the run dir's `review.md` (built from `refs/prewalk/<id>/*`, not the Builder's report): its timeline, flags (`empty_after_L1`, `out_of_scope`, `template_edited`, `claim_mismatch`) and Builder diff L1..final; see [async-mode.md](references/async-mode.md). Review for:
+Enter this phase after the orchestrated Builder child returns or when the incoming prompt begins with `PREWALK_PHASE: NAVIGATOR_REVIEW` (legacy `PREWALK_PHASE: SOL_REVIEW` is accepted). This is a review-only phase unless the user explicitly asks for fixes. Do not read or rely on Builder's summary. For a persistent run, inspect `builder-review.patch`, `builder-review.json`, and `validation/`; require actual diff and passing independent validation. For a legacy async run, start from `review.md` built from Git layers, not Builder prose. Review for:
 
 - Requirement coverage and behavioral correctness
 - Root-cause alignment and architectural consistency
@@ -217,7 +225,7 @@ Enter this phase after the orchestrated Builder child returns or when the incomi
 - Test quality and gaps between claimed and observed validation
 - Unrelated or accidental changes
 
-Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. Before accepting the return, inspect `run.json` and that turn's `prewalk_runtime.py` output; require the runtime-extracted final message to contain `PREWALK_PHASE: NAVIGATOR_REVIEW` or legacy `PREWALK_PHASE: SOL_REVIEW` with the same `HANDOFF_ID`, and require the observed Builder session id to match the recorded one. Confirm the runtime `--host` value matches the selected adapter. Inspect the cumulative schema_version 2 usage artifact: `turns` must be one aggregate per Builder turn, `calls` must be the raw model-call records, and re-inspecting the same turn must replace rather than duplicate its aggregate. Record per-Builder-turn and per-call usage, cache ratio with its adapter-specific denominator, and cost status and scope as observability only; they are not quality evidence and do not prove a cache benefit. A client-side estimate is not an invoice; a session-cumulative estimate is retained as the latest value, never summed. Check the recorded model/effort selection against the actual launch command and the parent session; do not treat the executor's self-report as evidence of the model it ran.
+Run targeted read-only checks or tests when useful. Report actionable findings by severity with precise paths and lines. If no findings exist, say so explicitly and list residual risks or checks not performed. Include a concise execution/validation status. For a persistent run, require `READY_FOR_REVIEW`, matching PID/session, actual diff, and validation artifacts before `approve`; no Builder text is required. For a legacy run, inspect `run.json` and that turn's `prewalk_runtime.py` output, including its return marker, session identity, and cumulative usage. Treat all usage and cost records as observability only, never proof of quality or model identity.
 
 If a progress file exists, read it as navigation context only. A missing or stale progress file is not proof of failure or of a hung process: inspect the background task and raw output before diagnosing, and report the last event time rather than inventing activity. Never treat the final progress event as approval evidence — verify the actual diff.
 

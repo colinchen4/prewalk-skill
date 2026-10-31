@@ -49,7 +49,7 @@ class AsyncTestBase(unittest.TestCase):
 
     def tearDown(self) -> None:
         state = ASYNC._read_json(self.run / "state.json", {})
-        if state.get("status") not in ASYNC.TERMINAL and self.run.exists():
+        if state and state.get("status") not in ASYNC.TERMINAL and self.run.exists():
             ASYNC.cancel(self.run, timeout=4)
         self.temp.cleanup()
 
@@ -57,6 +57,7 @@ class AsyncTestBase(unittest.TestCase):
         data = {
             "handoff_id": "h1",
             "host": "generic",
+            "layers": False,
             "goal": "Finish the pattern from the first edit",
             "success": ["unit tests pass"],
             "scope": ["src/"],
@@ -128,6 +129,16 @@ class AsyncLaunchTests(AsyncTestBase):
         done = ASYNC.wait(self.run, timeout=10)
         self.assertEqual(done["status"], "invalid_return")
         self.assertIn("HANDOFF_ID", done["error"])
+
+    def test_pid_alive_accepts_current_process_on_windows(self):
+        self.assertTrue(ASYNC._pid_alive(os.getpid()))
+
+    def test_missing_builder_executable_reaches_failed_state(self):
+        path = self.brief(argv=[str(self.root / "missing-builder-executable")])
+        ASYNC.launch(self.run, path)
+        done = ASYNC.wait(self.run, timeout=10)
+        self.assertEqual(done["status"], "failed")
+        self.assertIn("could not start Builder", done["error"])
 
 
 class RedirectAndCancelTests(AsyncTestBase):

@@ -142,6 +142,16 @@ def apply_effort(explicit: str | None = None) -> str:
     return EFFORT
 
 
+def apply_saved_effort(paths: "Paths", explicit: str | None = None) -> str:
+    if (explicit is not None and str(explicit).strip()) or os.environ.get(EFFORT_ENV, "").strip():
+        return apply_effort(explicit)
+    try:
+        configured = parse_toml_text(paths.agent.read_text(encoding="utf-8")).get("model_reasoning_effort")
+    except (OSError, ManagerError):
+        configured = None
+    return apply_effort(configured if isinstance(configured, str) and configured.strip() else None)
+
+
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -1591,9 +1601,9 @@ def main() -> int:
     parser.add_argument("--remove-credential", action="store_true")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args()
-    apply_effort(args.effort)
     paths = resolve_paths(args.codex_home)
     try:
+        apply_saved_effort(paths, args.effort)
         explicit_base_url = (
             canonical_base_url(args.base_url) if args.base_url is not None else None
         )

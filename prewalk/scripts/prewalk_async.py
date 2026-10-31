@@ -8,18 +8,25 @@ runs.  ``progress.jsonl`` and ``state.json`` keep updating after the parent
 turn ends.  Navigator checks back with ``status`` (non-blocking, tail only),
 redirects with ``steer``, stops with ``cancel``, or blocks with ``wait``.
 
-The Builder argv comes from the selected adapter document; this module never
-invents host commands.  Run-directory files (per Builder turn N)::
+The Builder command comes from either ``"backend": "<id>"`` in brief.json (the
+builder_backends registry builds argv/env/cwd per CLI, e.g. claude-code-sub on
+sonnet) or a literal ``argv``/``resume_argv`` copied from an adapter document
+(generic override; wins when both are present).  Run-directory files (per turn N)::
 
     brief.txt  steer.md  progress.jsonl  state.json  cancel.requested
     turn-NNN-events.jsonl  turn-NNN.err  turn-NNN-final.txt  usage.json
     layers.json  first-edit.patch  review.md  review.json  (git layers, see
     prewalk_layers.py: L1 = first edit, L2-<n> = one per Builder step)
+    turn-NNN-attempt-K.*  (earlier attempts archived by ``retry``)
+
+A quota/rate-limit exit is reported as ``waiting_rate_limit`` (retryable), not
+``failed``; ``retry`` relaunches the same turn once the limit resets.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -39,11 +46,15 @@ except ImportError:  # pragma: no cover
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import prewalk_runtime  # noqa: E402
 import prewalk_layers  # noqa: E402
+import prewalk_config  # noqa: E402
+import builder_backends as bb  # noqa: E402
+from builder_backends.process import popen_group_kwargs, signal_group  # noqa: E402
 
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,40}$")
 MAX_CONTEXT_CHARS = 1500
-TERMINAL = {"completed", "failed", "cancelled", "invalid_return"}
-HOSTS = ("kimi", "codex", "claude-code", "dsh", "generic")
+TERMINAL = {"completed", "failed", "cancelled", "invalid_return", "waiting_rate_limit"}
+RETRYABLE = {"waiting_rate_limit"}
+HOSTS = bb.RUNTIME_HOSTS  # single source: builder_backends registry
 POLL_SECONDS = 0.1
 
 
@@ -57,7 +68,7 @@ def _now() -> str:
 
 def _read_json(path: Path, default: Any = None) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(prewalk_runtime._read_text_with_retry(path))
     except FileNotFoundError:
         return default
 
@@ -142,12 +153,104 @@ def validate_brief(brief: Any) -> dict[str, Any]:
     context = brief.get("context", "")
     if not isinstance(context, str) or len(context) > MAX_CONTEXT_CHARS:
         raise AsyncError(f"context must be a string of at most {MAX_CONTEXT_CHARS} chars")
-    argv = brief.get("argv")
-    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
-        raise AsyncError("argv (taken from the adapter document) is required")
+    backend = brief.get("backend")
+    if backend is not None:
+        if not isinstance(backend, str):
+            raise AsyncError("backend must be a registry id string")
+        try:
+            b = bb.get(backend)
+            if not b.implemented:
+                raise bb.BackendNotImplemented(f"{b.id}: launch is not implemented yet (registry stub)")
+            if "argv" not in brief:
+                b.check_model(brief.get("model"))
+                b.resolve_effort(brief.get("effort"), brief.get("model"))
+        except bb.BackendError as exc:
+            raise AsyncError(str(exc)) from exc
+        for key in ("model", "effort"):
+            if brief.get(key) is not None and not isinstance(brief[key], str):
+                raise AsyncError(f"{key} must be a string")
+        allowed = brief.get("allowed_bash", [])
+        if not isinstance(allowed, list) or not all(isinstance(a, str) for a in allowed):
+            raise AsyncError("allowed_bash must be a list of command prefixes")
+    if backend is None or "argv" in brief:
+        argv = brief.get("argv")
+        if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+            raise AsyncError("argv (taken from the adapter document) or backend is required")
     if brief.get("host", "generic") not in HOSTS:
         raise AsyncError(f"unsupported host {brief.get('host')!r}")
     return brief
+
+
+def _uses_registry(brief: dict[str, Any]) -> bool:
+    return brief.get("backend") is not None and "argv" not in brief
+
+
+def _runtime_host(brief: dict[str, Any]) -> str:
+    if _uses_registry(brief):
+        return bb.get(brief["backend"]).runtime_host
+    return brief.get("host", "generic")
+
+
+# ------------------------------------------------------------ concurrency
+
+def _active_dir() -> Path:
+    return prewalk_config.home_dir() / "active"
+
+
+def _active_entries() -> list[dict[str, Any]]:
+    live = []
+    d = _active_dir()
+    for f in sorted(d.glob("*.json")) if d.is_dir() else []:
+        entry = _read_json(f, {}) or {}
+        st = _read_json(Path(entry.get("run_dir", "")) / "state.json", {}) if entry.get("run_dir") else {}
+        if _pid_alive(entry.get("supervisor_pid")) and st.get("status") not in TERMINAL:
+            live.append(entry)
+        else:
+            try:
+                f.unlink()
+            except OSError:
+                pass
+    return live
+
+
+def _active_file(run_dir: Path) -> Path:
+    import hashlib
+    return _active_dir() / (hashlib.sha256(str(run_dir).encode()).hexdigest()[:16] + ".json")
+
+
+@contextlib.contextmanager
+def _active_lock():
+    _active_dir().mkdir(parents=True, exist_ok=True)
+    with open(_active_dir() / ".lock", "a+b") as handle:
+        if os.name == "nt":
+            import msvcrt
+
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+            handle.seek(0)
+            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+        elif fcntl is not None:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == "nt":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif fcntl is not None:
+                fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def _check_concurrency(run_dir: Path) -> None:
+    limit = prewalk_config.max_concurrency()
+    others = [e for e in _active_entries() if e.get("run_dir") != str(run_dir)]
+    if len(others) >= limit:
+        busy = ", ".join(f"{e.get('backend')} in {e.get('run_dir')}" for e in others)
+        raise AsyncError(f"Builder concurrency limit {limit} reached ({busy}); wait for it, "
+                         f"or raise builder.max_concurrency (max {prewalk_config.MAX_CONCURRENCY_LIMIT}) "
+                         "with `prewalk setup --max-concurrency 2` if your plan allows it")
 
 
 def render_brief(brief: dict[str, Any], paths: dict[str, Path], first_edit: str = "") -> str:
@@ -180,6 +283,21 @@ def render_brief(brief: dict[str, Any], paths: dict[str, Path], first_edit: str 
 def _pid_alive(pid: Any) -> bool:
     if not isinstance(pid, int) or pid <= 0:
         return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return False
+            return code.value == 259
+        finally:
+            kernel32.CloseHandle(handle)
     try:
         done, _ = os.waitpid(pid, os.WNOHANG)
         if done == pid:
@@ -269,22 +387,36 @@ def launch(run_dir: Path, brief_path: Path, turn: int = 1,
     run_dir.mkdir(parents=True, exist_ok=True)
     if paths["cancel"].exists():
         paths["cancel"].unlink()
-    if turn == 1:
-        first_edit = _prepare_layers(run_dir, brief)
-        prewalk_runtime._atomic_write_text(paths["brief"], render_brief(brief, paths, first_edit))
-    elif not paths["brief"].exists():
-        raise AsyncError(f"write the resume delta to {paths['brief']} first")
-    _write_json(run_dir / "brief.json", brief)
-    state = {"handoff_id": brief["handoff_id"], "host": brief.get("host", "generic"),
-             "turn": turn, "expected_session": expected_session or state.get("session_id"),
-             "session_id": state.get("session_id"), "status": "starting", "launched_at": _now()}
-    _write_json(paths["state"], state)
-    sup = subprocess.Popen(
-        [sys.executable, str(Path(__file__).resolve()), "_supervise",
-         "--run-dir", str(run_dir), "--turn", str(turn)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        start_new_session=True, close_fds=True,
-    )
+    registry = _uses_registry(brief)
+    with _active_lock() if registry else contextlib.nullcontext():
+        if registry:
+            _check_concurrency(run_dir)
+        if turn == 1:
+            first_edit = _prepare_layers(run_dir, brief)
+            prewalk_runtime._atomic_write_text(paths["brief"], render_brief(brief, paths, first_edit))
+        elif not paths["brief"].exists():
+            raise AsyncError(f"write the resume delta to {paths['brief']} first")
+        _write_json(run_dir / "brief.json", brief)
+        previous = state
+        state = {"handoff_id": brief["handoff_id"], "host": _runtime_host(brief),
+                 "turn": turn, "expected_session": expected_session or previous.get("session_id"),
+                 "session_id": previous.get("session_id"), "status": "starting", "launched_at": _now()}
+        if registry:
+            b = bb.get(brief["backend"])
+            state.update(backend=b.id, model=brief.get("model") or b.weak_model,
+                         requested_effort=brief.get("effort") or b.weak_effort)
+        if previous.get("attempts"):
+            state["attempts"] = previous["attempts"]
+        _write_json(paths["state"], state)
+        sup = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), "_supervise",
+             "--run-dir", str(run_dir), "--turn", str(turn)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            close_fds=True, **popen_group_kwargs(),
+        )
+        if registry:
+            _write_json(_active_file(run_dir), {"run_dir": str(run_dir), "supervisor_pid": sup.pid,
+                                                "backend": state["backend"], "since": _now()})
     return {"ok": True, "run_dir": str(run_dir), "turn": turn, "supervisor_pid": sup.pid,
             "brief": str(paths["brief"]), "progress": str(paths["progress"]),
             "next": "keep working; check back with `status --after <last_seq>`"}
@@ -295,26 +427,61 @@ def supervise(run_dir: Path, turn: int) -> int:
     paths = paths_for(run_dir, turn)
     state = _read_json(paths["state"])
     cwd = brief.get("cwd") or os.getcwd()
-    mapping = {k: str(v) for k, v in paths.items()}
-    mapping.update(cwd=cwd, session=state.get("expected_session") or "")
-    argv = [a.format(**mapping) for a in (brief["argv"] if turn == 1 else brief.get("resume_argv") or [])]
-    if not argv:
-        state.update(status="failed", error="resume_argv missing from brief", ended_at=_now())
-        _write_json(paths["state"], state)
-        return 0
-    stdin = open(paths["brief"], "rb") if brief.get("stdin_brief", True) else subprocess.DEVNULL
+    backend = bb.get(brief["backend"]) if _uses_registry(brief) else None
+    # Builders append progress themselves; tell every backend where (paths only, no secrets).
+    env_overlay = {"PREWALK_RUN_DIR": str(run_dir), "PREWALK_PROGRESS": str(paths["progress"]),
+                   "PREWALK_STEER": str(paths["steer"]), "PREWALK_HANDOFF_ID": state["handoff_id"]}
+    if backend is not None:
+        session = state.get("expected_session") if turn > 1 else backend.new_session_id()
+        try:
+            spec = backend.launch(turn=turn, workdir=cwd, brief_path=str(paths["brief"]),
+                                  model=brief.get("model"), effort=brief.get("effort"),
+                                  session=session, writable_dirs=[str(run_dir)],
+                                  allowed_bash=brief.get("allowed_bash") or [])
+        except bb.BackendError as exc:
+            state.update(status="failed", error=str(exc), ended_at=_now())
+            _write_json(paths["state"], state)
+            _release_active(run_dir)
+            return 0
+        argv, cwd = spec.argv, spec.cwd
+        env = bb.child_env(os.environ, spec.env_remove, {**spec.env, **env_overlay})
+        stdin = open(spec.stdin_path, "rb") if spec.stdin_path else subprocess.DEVNULL
+        state.update(backend=backend.id, model=spec.model, requested_effort=spec.requested_effort,
+                     effective_effort=spec.effective_effort, launch=spec.describe())
+        if turn == 1 and session:
+            state["assigned_session"] = session
+    else:
+        mapping = {k: str(v) for k, v in paths.items()}
+        mapping.update(cwd=cwd, session=state.get("expected_session") or "")
+        argv = [a.format(**mapping) for a in (brief["argv"] if turn == 1 else brief.get("resume_argv") or [])]
+        if not argv:
+            state.update(status="failed", error="resume_argv missing from brief", ended_at=_now())
+            _write_json(paths["state"], state)
+            return 0
+        env = {**os.environ, **env_overlay}
+        stdin = open(paths["brief"], "rb") if brief.get("stdin_brief", True) else subprocess.DEVNULL
     layers_on = (run_dir / "layers.json").exists() and brief.get("layers", True) is not False
     seen = len(read_tail(paths["progress"]))  # before Popen: no Builder line is missed
     try:
         with open(paths["events"], "wb") as out, open(paths["err"], "wb") as err:
-            proc = subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=out, stderr=err,
-                                    start_new_session=True)
+            try:
+                proc = subprocess.Popen(argv, cwd=cwd, stdin=stdin, stdout=out, stderr=err, env=env,
+                                        **popen_group_kwargs())
+            except OSError as exc:
+                state.update(status="failed", error=f"could not start Builder: {exc}", ended_at=_now())
+                _write_json(paths["state"], state)
+                _release_active(run_dir)
+                return 0
             state.update(status="running", supervisor_pid=os.getpid(), builder_pid=proc.pid,
                          started_at=_now())
             _write_json(paths["state"], state)
+            started = f"Builder pid {proc.pid}"
+            if backend is not None:
+                started += (f" ({backend.id}, model {state['model']}, effort requested "
+                            f"{state['requested_effort']} -> effective {state['effective_effort']})")
             append_event(paths["progress"], {"handoff_id": state["handoff_id"], "turn": turn,
                                              "source": "supervisor", "state": "started",
-                                             "summary": f"Builder pid {proc.pid}"})
+                                             "summary": started})
             while True:
                 try:
                     code = proc.wait(timeout=POLL_SECONDS)
@@ -332,6 +499,13 @@ def supervise(run_dir: Path, turn: int) -> int:
         state["status"], summary = "cancelled", "Navigator cancelled the turn; work preserved"
     elif code != 0:
         state["status"], summary = "failed", f"Builder exited {code}"
+        if backend is not None:
+            text = _tail_text(paths["err"]) + "\n" + _tail_text(paths["events"])
+            if backend.classify_failure(code, text) == "rate_limited":
+                hint = _limit_line(text)
+                state.update(status="waiting_rate_limit", retryable=True, limit_message=hint)
+                summary = (f"{backend.id} hit a usage/rate limit ({hint}); work preserved. "
+                           "Retry later with `prewalk_async.py retry`, or switch model/backend.")
     else:
         try:
             result = prewalk_runtime.inspect(
@@ -343,6 +517,13 @@ def supervise(run_dir: Path, turn: int) -> int:
             state.update(status="completed", session_id=result["session_id"],
                          usage_status=result["usage_status"])
             summary = "Builder returned a NAVIGATOR_REVIEW package"
+            if backend is not None:
+                observed = backend.observed_models(paths["events"])
+                state["observed_models"] = observed
+                bad = [m for m in observed if _is_blocked(backend, m)]
+                if bad:
+                    state["model_warning"] = f"stream reports blocked model(s) {bad}"
+                    summary += f"; WARNING {state['model_warning']}"
         except (prewalk_runtime.InspectError, OSError) as exc:
             state.update(status="invalid_return", error=str(exc))
             summary = f"return rejected: {exc}"
@@ -351,10 +532,41 @@ def supervise(run_dir: Path, turn: int) -> int:
         if state.get("review_report"):
             summary += f"; layer review: {state['review_report']}"
     _write_json(paths["state"], state)
+    _release_active(run_dir)
     append_event(paths["progress"], {"handoff_id": state["handoff_id"], "turn": turn,
                                      "source": "supervisor", "state": state["status"],
                                      "summary": summary})
     return 0
+
+
+def _release_active(run_dir: Path) -> None:
+    try:
+        _active_file(run_dir).unlink()
+    except OSError:
+        pass
+
+
+def _tail_text(path: Path, limit: int = 8000) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    return data[-limit:].decode("utf-8", errors="replace")
+
+
+def _limit_line(text: str) -> str:
+    for line in text.splitlines():
+        if bb.is_rate_limited(line):
+            return line.strip()[:200]
+    return "limit reached"
+
+
+def _is_blocked(backend: Any, model: str) -> bool:
+    try:
+        backend.check_model(model)
+        return False
+    except bb.BackendError:
+        return True
 
 
 def status(run_dir: Path, after_seq: int = 0) -> dict[str, Any]:
@@ -369,7 +581,12 @@ def status(run_dir: Path, after_seq: int = 0) -> dict[str, Any]:
               "last_seq": tail[-1]["seq"] if tail else after_seq}
     if state["status"] == "running" and not _pid_alive(state.get("supervisor_pid")):
         result["note"] = "supervisor not alive; inspect raw turn artifacts"
-    for key in ("error", "session_id", "exit_code", "review_report"):
+    if state["status"] in RETRYABLE:
+        result["retryable"] = True
+        result["next"] = "retry later: prewalk_async.py retry --run-dir <run_dir> [--model <alt>]"
+    for key in ("error", "session_id", "exit_code", "review_report", "backend", "model",
+                "requested_effort", "effective_effort", "limit_message", "observed_models",
+                "model_warning"):
         if state.get(key) is not None:
             result[key] = state[key]
     if result["terminal"] and state["status"] == "completed":
@@ -402,24 +619,57 @@ def cancel(run_dir: Path, timeout: float = 10.0) -> dict[str, Any]:
         if time.monotonic() > deadline:
             return {"ok": False, "status": state["status"], "note": "Builder never started"}
         time.sleep(0.05)
-    sig = signal.SIGTERM
-    while True:
+    sequence = ("SIGTERM", "SIGKILL")
+    if state.get("backend"):
         try:
-            if hasattr(os, "killpg"):
-                os.killpg(state["builder_pid"], sig)
-            else:  # pragma: no cover
-                os.kill(state["builder_pid"], sig)
-        except ProcessLookupError:
+            sequence = tuple(bb.get(state["backend"]).cancel_signals)
+        except bb.BackendError:
             pass
-        end = time.monotonic() + (timeout / 2)
+    step = timeout / max(len(sequence), 1)
+    for name in sequence:
+        signal_group(state["builder_pid"], name)
+        end = time.monotonic() + step
         while time.monotonic() < end:
             state = _read_json(paths["state"])
             if state["status"] in TERMINAL:
-                return {"ok": True, "status": state["status"]}
+                return {"ok": True, "status": state["status"], "signals": name}
             time.sleep(0.05)
-        if sig == signal.SIGKILL or not hasattr(signal, "SIGKILL"):
-            return {"ok": False, "status": state["status"], "note": "supervisor has not confirmed"}
-        sig = signal.SIGKILL
+    return {"ok": False, "status": state["status"], "note": "supervisor has not confirmed"}
+
+
+def retry(run_dir: Path, model: str | None = None, effort: str | None = None,
+          backend: str | None = None) -> dict[str, Any]:
+    """Relaunch a turn that stopped on a usage/rate limit.  The earlier attempt's
+    artifacts are archived (never overwritten); the worktree is left as is."""
+    run_dir = run_dir.resolve()
+    paths = paths_for(run_dir)
+    state = _read_json(paths["state"])
+    if not state:
+        raise AsyncError(f"no Builder run in {run_dir}")
+    if state["status"] not in RETRYABLE:
+        raise AsyncError(f"status is {state['status']!r}; only {sorted(RETRYABLE)} turns can be retried")
+    turn = state["turn"]
+    tp = paths_for(run_dir, turn)
+    attempts = list(state.get("attempts") or [])
+    k = len(attempts) + 1
+    for key, suffix in (("events", "events.jsonl"), ("err", "err"), ("final", "final.txt")):
+        if tp[key].exists():
+            tp[key].rename(run_dir / f"turn-{turn:03d}-attempt-{k}.{suffix}")
+    attempts.append({k2: state.get(k2) for k2 in ("backend", "model", "status", "exit_code",
+                                                  "limit_message", "ended_at")})
+    state["attempts"] = attempts
+    _write_json(paths["state"], state)
+    brief = _read_json(run_dir / "brief.json")
+    for key, value in (("backend", backend), ("model", model), ("effort", effort)):
+        if value:
+            brief[key] = value
+    if backend and not model:
+        brief.pop("model", None)
+    retry_brief = run_dir / f"brief-retry-{k}.json"
+    _write_json(retry_brief, brief)
+    result = launch(run_dir, retry_brief, turn, state.get("expected_session") if turn > 1 else None)
+    result["attempt"] = k + 1
+    return result
 
 
 def wait(run_dir: Path, timeout: float) -> dict[str, Any]:
@@ -447,6 +697,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("wait"); p.add_argument("--run-dir", required=True, type=Path)
     p.add_argument("--timeout", type=float, default=3600.0)
     p = sub.add_parser("review"); p.add_argument("--run-dir", required=True, type=Path)
+    p = sub.add_parser("retry"); p.add_argument("--run-dir", required=True, type=Path)
+    p.add_argument("--model"); p.add_argument("--effort"); p.add_argument("--backend")
     p = sub.add_parser("_supervise"); p.add_argument("--run-dir", required=True, type=Path)
     p.add_argument("--turn", type=int, default=1)
     args = parser.parse_args(argv)
@@ -461,12 +713,14 @@ def main(argv: list[str] | None = None) -> int:
             result = cancel(args.run_dir, args.timeout)
         elif args.command == "wait":
             result = wait(args.run_dir, args.timeout)
+        elif args.command == "retry":
+            result = retry(args.run_dir, args.model, args.effort, args.backend)
         elif args.command == "review":
             report = prewalk_layers.review_report(args.run_dir)
             result = {k: report[k] for k in ("ok", "flags", "layers", "review_md")}
         else:
             return supervise(args.run_dir, args.turn)
-    except (AsyncError, prewalk_layers.LayerError, OSError, ValueError) as exc:
+    except (AsyncError, prewalk_layers.LayerError, prewalk_config.ConfigError, OSError, ValueError) as exc:
         print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
         return 2
     print(json.dumps(result, ensure_ascii=False))

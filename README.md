@@ -48,7 +48,15 @@ The skill is self-contained for orchestration. The runtime adapter is stdlib-onl
 
 ## Setup
 
-Check the selected adapter's readiness or status before the model/effort preflight. Ask connection questions only when that status is missing or incomplete, or when the user asks to change the endpoint. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
+Quick start is read-only model discovery, not a setup wizard:
+
+```sh
+python3 prewalk/scripts/prewalk.py models --navigator-host kimi  # list usable Builder models/efforts; no config writes
+```
+
+Prewalk then asks one model/effort preflight: Navigator defaults to the current session's model and effective effort; Builder defaults to an available weak model with `medium` effort when supported, otherwise effort is reported as not settable. `doctor`, `setup`, and `test` are optional diagnostics, not prerequisites. A ready saved config may supply a Builder default but is never required. Backends, blocked models, effort mapping, and what is not yet live-verified: [`prewalk/references/backends.md`](prewalk/references/backends.md).
+
+Handle connection setup only if the selected backend actually fails to launch because authentication or endpoint configuration is missing. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
 
 Configuring a provider or endpoint is not proof that a requested model or effort works. Keep the core preflight and validate the actual launch values.
 
@@ -60,7 +68,7 @@ Ask in plain language, for example:
 [$prewalk] 把这三个批改问题修掉，测试由默认模型进行
 ```
 
-Navigator runs the prewalk, lands one edit, selects an adapter, dispatches the handoff package to the Builder executor process, waits, then reviews the real worktree diff before reporting.
+Navigator classifies and plans before any Builder starts, writes L1 only for `sample_guided`, then launches one persistent Builder in an isolated Git worktree. The same PID/session handles scoped checks, implementation, and validation without a cold start. Navigator approves only actual diff and validation evidence; no Builder prose or automatic merge is required. The full protocol is in [`prewalk/references/builder-fusion.md`](prewalk/references/builder-fusion.md).
 
 ### First use
 

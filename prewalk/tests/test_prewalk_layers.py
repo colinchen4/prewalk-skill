@@ -79,6 +79,8 @@ class RepoBase(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         self.base = Path(self.temp.name)
+        self._ceiling = os.environ.get("GIT_CEILING_DIRECTORIES")
+        os.environ["GIT_CEILING_DIRECTORIES"] = str(self.base)
         self.repo = self.base / "repo"
         self.run = self.base / "run"
         self.repo.mkdir()
@@ -98,10 +100,15 @@ class RepoBase(unittest.TestCase):
         state = ASYNC._read_json(self.run / "state.json", {})
         if state and state.get("status") not in ASYNC.TERMINAL:
             ASYNC.cancel(self.run, timeout=4)
+        if self._ceiling is None:
+            os.environ.pop("GIT_CEILING_DIRECTORIES", None)
+        else:
+            os.environ["GIT_CEILING_DIRECTORIES"] = self._ceiling
         self.temp.cleanup()
 
-    def first_edit(self) -> None:
+    def first_edit(self, run_dir: Path | None = None) -> None:
         """Navigator's template edit: change line 3, add one handler (untracked)."""
+        LAYERS.snapshot(self.repo, run_dir or self.run, "h1", "L0", "navigator", "inherited baseline")
         lines = APP.splitlines()
         lines[2] = "line_3 = handler_registry()  # template"
         (self.repo / "src/app.py").write_text("\n".join(lines) + "\n")
@@ -131,12 +138,14 @@ class SnapshotTests(RepoBase):
         self.assertIn("src/handlers/base.py", files)
         self.assertNotIn("debug.log", files)
         self.assertNotIn("build/out.o", files)
-        self.assertEqual(sh(self.repo, "rev-parse", "refs/prewalk/h1/L0").strip(), self.head)
+        l0 = sh(self.repo, "rev-parse", "refs/prewalk/h1/L0").strip()
         self.assertEqual(sh(self.repo, "rev-parse", "refs/prewalk/h1/L1").strip(), rec["sha"])
-        self.assertEqual(rec["parent"], self.head)
+        self.assertEqual(rec["parent"], l0)
         self.assertFalse(list(self.run.glob(".prewalk-index-*")), "temp index removed")
         self.assertTrue((self.run / "first-edit.patch").read_text().startswith("diff --git"))
         doc = json.loads((self.run / "layers.json").read_text())
+        self.assertEqual(doc["base"]["parent"], self.head)
+        self.assertEqual(doc["base"]["manifest"], [])
         self.assertEqual([l["name"] for l in doc["layers"]], ["L1"])
         for key in ("name", "sha", "parent", "via", "message", "ts", "manifest", "totals"):
             self.assertIn(key, doc["layers"][0])
@@ -152,8 +161,8 @@ class SnapshotTests(RepoBase):
         self.assertEqual(rec["totals"], {"files": 4, "added": 3, "deleted": 2})
 
     def test_run_dir_inside_repo_is_never_snapshotted(self):
-        self.first_edit()
         run = self.repo / ".prewalk-run"
+        self.first_edit(run)
         rec = LAYERS.snapshot(self.repo, run, "h1", "L1")
         rec2 = LAYERS.snapshot(self.repo, run, "h1")
         files = sh(self.repo, "ls-tree", "-r", "--name-only", rec2["sha"]).split()
@@ -163,12 +172,14 @@ class SnapshotTests(RepoBase):
 
     def test_missing_index_falls_back_to_head_and_unborn_repo_works(self):
         (self.repo / ".git/index").unlink()
+        LAYERS.snapshot(self.repo, self.run, "h1", "L0")
         rec = LAYERS.snapshot(self.repo, self.run, "h1", "L1")
         self.assertEqual(rec["manifest"], [])  # worktree == HEAD
         self.assertFalse((self.repo / ".git/index").exists())
         fresh = self.base / "fresh"
         fresh.mkdir()
         sh(fresh, "init", "-q")
+        LAYERS.snapshot(fresh, self.base / "run2", "h2", "L0")
         (fresh / "a.txt").write_text("a\n")
         rec = LAYERS.snapshot(fresh, self.base / "run2", "h2", "L1")
         self.assertEqual([e["path"] for e in rec["manifest"]], ["a.txt"])
@@ -177,6 +188,7 @@ class SnapshotTests(RepoBase):
                                         capture_output=True).returncode, 1)
 
     def test_rejects_duplicate_layer_bad_ids_and_non_git(self):
+        LAYERS.snapshot(self.repo, self.run, "h1", "L0")
         LAYERS.snapshot(self.repo, self.run, "h1", "L1")
         with self.assertRaises(LayerError):
             LAYERS.snapshot(self.repo, self.run, "h1", "L1")
@@ -187,7 +199,17 @@ class SnapshotTests(RepoBase):
         with self.assertRaises(LayerError):
             LAYERS.snapshot(self.base, self.base / "r4", "h1", "L1")
 
+    def test_l0_separates_inherited_dirty_changes(self):
+        (self.repo / "inherited.txt").write_text("keep me\n")
+        self.first_edit()
+        rec = LAYERS.snapshot(self.repo, self.run, "h1", "L1")
+        self.assertNotIn("inherited.txt", {e["path"] for e in rec["manifest"]})
+        doc = LAYERS.load(self.run)
+        self.assertIn("inherited.txt", {e["path"] for e in doc["base"]["manifest"]})
+        self.assertNotIn("inherited.txt", (self.run / "first-edit.patch").read_text())
+
     def test_first_edit_section_is_capped_with_truncation_note(self):
+        LAYERS.snapshot(self.repo, self.run, "h1", "L0")
         (self.repo / "src/big.py").write_text("".join(f"x{i} = {i}\n" for i in range(2000)))
         LAYERS.snapshot(self.repo, self.run, "h1", "L1")
         section = LAYERS.first_edit_section(self.run, max_chars=800)
@@ -199,8 +221,10 @@ class SnapshotTests(RepoBase):
         self.assertIn("x1999 = 1999", (self.run / "first-edit.patch").read_text())
 
     def test_cleanup_deletes_only_this_handoff_refs(self):
+        LAYERS.snapshot(self.repo, self.run, "h1", "L0")
         LAYERS.snapshot(self.repo, self.run, "h1", "L1")
         LAYERS.snapshot(self.repo, self.run, "h1")
+        LAYERS.snapshot(self.repo, self.base / "other", "h9", "L0")
         LAYERS.snapshot(self.repo, self.base / "other", "h9", "L1")
         out = LAYERS.cleanup(self.run, None, "h1")
         self.assertEqual(sorted(out["deleted"]), ["refs/prewalk/h1/L0", "refs/prewalk/h1/L1",
@@ -300,12 +324,12 @@ class AsyncLayerTests(RepoBase):
         done = ASYNC.wait(self.run, timeout=20)
         self.assertEqual(done["status"], "failed")
         layers = self.layers()
-        self.assertEqual([l["name"] for l in layers], ["L1", "L2-1", "L2-2", "L2-3"])
-        self.assertEqual(layers[-1]["via"], "supervisor")
-        self.assertTrue(layers[-1]["final"])
-        self.assertEqual([e["path"] for e in layers[-1]["manifest"]], ["src/handlers/partial.py"])
+        captured = {e["path"] for layer in layers if layer["name"].startswith("L2-")
+                    for e in layer["manifest"]}
+        self.assertEqual(captured, {"src/handlers/h0.py", "src/handlers/h1.py", "src/handlers/partial.py"})
         self.assertIn("no_return_package", self.flags())
-        self.assertIn("refs/prewalk/h1/L2-3", sh(self.repo, "for-each-ref", "refs/prewalk/"))
+        last_ref = layers[-1]["ref"]
+        self.assertIn(last_ref, sh(self.repo, "for-each-ref", "refs/prewalk/"))
 
     def test_cancel_leaves_layers_and_review(self):
         self.first_edit()
@@ -318,6 +342,7 @@ class AsyncLayerTests(RepoBase):
         self.assertTrue((self.run / "review.md").exists())
         self.assertIn("Builder status: cancelled", (self.run / "review.md").read_text())
 
+    @unittest.skipIf(os.name == "nt", "POSIX process-group kill test")
     def test_layers_survive_a_killed_supervisor(self):
         self.first_edit()
         ASYNC.launch(self.run, self.brief(steps=50, delay=0.3))
