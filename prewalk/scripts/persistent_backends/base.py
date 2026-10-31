@@ -8,6 +8,7 @@ import queue
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +27,17 @@ BUILDER_ENV_REMOVE = (
 
 class PersistentError(RuntimeError):
     pass
+
+
+class CancelledError(PersistentError):
+    pass
+
+
+def _env_seconds(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
 
 
 def binary_integrity(path: str) -> dict[str, Any]:
@@ -51,6 +63,7 @@ class JsonRpcBackend:
         self._write_lock = threading.Lock()
         self._next_id = 0
         self.session_id: str | None = None
+        self.last_text = ""
         self.config_options: list[dict[str, Any]] = []
         self.proc = subprocess.Popen(argv, cwd=str(self.cwd), stdin=subprocess.PIPE,
                                      stdout=subprocess.PIPE, stderr=self._err,
@@ -82,31 +95,90 @@ class JsonRpcBackend:
             self._events.close()
             self._messages.put({"type": "prewalk.process_closed", "returncode": self.proc.poll()})
 
-    def call(self, method: str, params: dict[str, Any], timeout: float = 600) -> dict[str, Any]:
+    def _send(self, message: dict[str, Any]) -> None:
         with self._write_lock:
-            self._next_id += 1
-            request_id = self._next_id
-            request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-            self._events.write(json.dumps({"direction": "navigator", "message": request},
+            self._events.write(json.dumps({"direction": "navigator", "message": message},
                                            ensure_ascii=False) + "\n")
             self._events.flush()
             assert self.proc.stdin is not None
             try:
-                self.proc.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+                self.proc.stdin.write(json.dumps(message, ensure_ascii=False) + "\n")
                 self.proc.stdin.flush()
             except (BrokenPipeError, OSError) as exc:
                 raise PersistentError(f"Builder stdin is closed: {exc}") from exc
-        while True:
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        self._send({"jsonrpc": "2.0", "method": method, "params": params})
+
+    def _update_text(self, message: dict[str, Any]) -> str | None:
+        if message.get("method") != "session/update":
+            return None
+        params = message.get("params") or {}
+        if self.session_id and params.get("sessionId") not in (None, self.session_id):
+            return None
+        update = params.get("update") or {}
+        if update.get("sessionUpdate") == "agent_message_chunk":
+            content = update.get("content") or {}
+            text = content.get("text")
+        elif update.get("type") == "agent_message_chunk":
+            text = update.get("text")
+        else:
+            text = None
+        return text if isinstance(text, str) else None
+
+    def _cancel_request(self, method: str, request_id: int) -> None:
+        try:
+            self.notify("session/cancel", {"sessionId": self.session_id})
+        except PersistentError:
+            pass
+        grace = _env_seconds("PREWALK_CANCEL_GRACE", 15.0)
+        deadline = time.monotonic() + grace
+        while time.monotonic() < deadline:
             try:
-                message = self._messages.get(timeout=timeout)
-            except queue.Empty as exc:
-                raise PersistentError(f"Builder request timed out: {method}") from exc
+                message = self._messages.get(timeout=min(0.5, deadline - time.monotonic()))
+            except queue.Empty:
+                continue
+            if message.get("type") == "prewalk.process_closed" or message.get("id") == request_id:
+                break
+        if self.proc.poll() is None:
+            self.proc.kill()
+        raise CancelledError(f"{method} cancelled by Navigator")
+
+    def call(self, method: str, params: dict[str, Any], timeout: float = 600,
+             idle_timeout: float | None = None,
+             cancel_check: Any = None) -> dict[str, Any]:
+        with self._write_lock:
+            self._next_id += 1
+            request_id = self._next_id
+        request = {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
+        self._send(request)
+        effective = idle_timeout if idle_timeout is not None else timeout
+        deadline = time.monotonic() + effective
+        self.last_text = ""
+        chunks: list[str] = []
+        while True:
+            if cancel_check is not None and cancel_check():
+                self._cancel_request(method, request_id)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise PersistentError(f"Builder request timed out: {method}")
+            try:
+                message = self._messages.get(timeout=min(0.5, remaining))
+            except queue.Empty:
+                continue
+            deadline = time.monotonic() + effective
+            text = self._update_text(message)
+            if text:
+                chunks.append(text)
             if message.get("type") == "prewalk.process_closed":
+                self.last_text = "".join(chunks)
                 raise PersistentError(f"Builder exited during {method}: {message.get('returncode')}")
             if message.get("id") != request_id:
                 continue
             if "error" in message:
+                self.last_text = "".join(chunks)
                 raise PersistentError(f"{method}: {message['error']}")
+            self.last_text = "".join(chunks)
             return message.get("result") or {}
 
     def start(self, model: str | None = None, effort: str | None = None) -> str:
@@ -144,11 +216,15 @@ class JsonRpcBackend:
         if current["sha256"] != self.integrity["sha256"] or current["size"] != self.integrity["size"]:
             raise PersistentError("Builder executable changed during the run")
 
-    def prompt(self, text: str) -> dict[str, Any]:
+    def prompt(self, text: str, cancel_check: Any = None) -> dict[str, Any]:
         if not self.session_id:
             raise PersistentError("Builder session has not started")
-        return self.call("session/prompt", {"sessionId": self.session_id,
-                                            "prompt": [{"type": "text", "text": text}]})
+        result = self.call("session/prompt",
+                           {"sessionId": self.session_id,
+                            "prompt": [{"type": "text", "text": text}]},
+                           idle_timeout=_env_seconds("PREWALK_BUILDER_IDLE_TIMEOUT", 1800.0),
+                           cancel_check=cancel_check)
+        return {"result": result, "text": self.last_text}
 
     def close(self) -> None:
         if self.session_id and self.proc.poll() is None:

@@ -57,7 +57,20 @@ class PersistentBuilderTests(unittest.TestCase):
         except Exception:
             pass
         self.env.stop()
-        self.tmp.cleanup()
+        for _ in range(25):
+            try:
+                self.tmp.cleanup()
+                return
+            except OSError:
+                time.sleep(0.2)
+
+    def wait_file(self, path: Path, timeout: float = 10) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if path.exists():
+                return
+            time.sleep(0.05)
+        self.fail(f"{path} not written")
 
     def wait_status(self, target: str, timeout: float = 30) -> dict:
         deadline = time.monotonic() + timeout
@@ -112,7 +125,7 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual((self.repo / ".git/index").read_bytes(), self.index)
         trace = json.loads((self.run / "mock-session.json").read_text())
         self.assertEqual([p["phase"] for p in trace["prompts"]],
-                         ["PREWALK_PHASE: EXPLORING", "PREWALK_PHASE: EXECUTE"])
+                         ["PREWALK_PHASE: EXECUTE"])
         self.assertEqual(trace["session_id"], state["session_id"])
         self.assertEqual(trace["pid"], state["builder_pid"])
         self.assertEqual(trace["leaked_env"], [])
@@ -222,6 +235,189 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual((self.repo / "hello.txt").read_text(), "source changed independently\n")
         self.assertTrue((self.run / "worktree").exists())
         prewalk_builder.queue(self.run, "discard")
+
+
+    def _validation(self, expected="base\nhello from builder\n"):
+        return (f'"{sys.executable}" -c "from pathlib import Path; '
+                f'assert Path(\'hello.txt\').read_text() == {expected!r}"')
+
+    def make_explore_plan(self):
+        plan = prewalk_plan.create_plan("h1", "brief_only",
+                                        "Append hello from builder to hello.txt",
+                                        ["exact file content"], ["hello.txt"], cwd=str(self.repo),
+                                        validation=[self._validation()], explore=True)
+        return prewalk_plan.write_plan(self.run, plan)
+
+    def cli(self, *argv: str) -> dict:
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = prewalk_builder.main(list(argv))
+        self.assertEqual(code, 0, out.getvalue())
+        return json.loads(out.getvalue())
+
+    def test_explore_opt_in_records_reply_and_contradictions(self):
+        os.environ["PREWALK_MOCK_CONTRADICT"] = "scope lists hello.txt but plan says goodbye.txt"
+        self.make_explore_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_file(self.run / "turn-001-reply.md")
+        state = self.wait_status("AWAITING_NAVIGATOR")
+        deadline = time.monotonic() + 10
+        while "exploration_contradictions" not in state and time.monotonic() < deadline:
+            time.sleep(0.05)
+            state = prewalk_builder.status(self.run)
+        self.assertTrue((self.run / "turn-001-reply.md").exists())
+        self.assertEqual(state["exploration_contradictions"],
+                         ["scope lists hello.txt but plan says goodbye.txt"])
+        prewalk_builder.queue(self.run, "execute", "continue with the approved plan")
+        self.wait_status("READY_FOR_REVIEW")
+        trace = json.loads((self.run / "mock-session.json").read_text())
+        self.assertEqual([p["phase"] for p in trace["prompts"]],
+                         ["PREWALK_PHASE: EXPLORING", "PREWALK_PHASE: EXECUTE"])
+        prewalk_builder.queue(self.run, "approve")
+        self.wait_status("approved")
+
+    def test_second_execute_prompt_is_delta_only(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        prewalk_builder.queue(self.run, "execute", "append once more")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            current = prewalk_builder.status(self.run)
+            if current.get("execution_count", 0) >= 2 and current["status"] in prewalk_builder.WAITING:
+                break
+            time.sleep(0.05)
+        trace = json.loads((self.run / "mock-session.json").read_text())
+        self.assertEqual(len(trace["prompts"]), 2)
+        self.assertTrue(trace["prompts"][0]["goal"])
+        self.assertFalse(trace["prompts"][1]["goal"])
+        state = prewalk_builder.status(self.run)
+        self.assertGreater(state["prompt_chars_total"], 0)
+        self.assertLess(state["last_prompt_chars"], trace["prompts"][0]["chars"])
+
+    def test_early_execute_with_cli_wait_returns_compact_summary(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        result = self.cli("execute", "--run-dir", str(self.run), "--text", "go",
+                          "--wait", "--timeout", "60")
+        self.assertEqual(result["status"], "READY_FOR_REVIEW")
+        self.assertTrue(result["idle"])
+        self.assertTrue(result["has_diff"])
+        self.assertEqual(result["execution_count"], 1)
+        self.assertEqual(result["handled_command_seq"], 1)
+        self.assertEqual(len(result["validation"]), 1)
+        self.assertEqual(result["validation"][0]["exit_code"], 0)
+        result = self.cli("approve", "--run-dir", str(self.run), "--wait", "--timeout", "60")
+        self.assertEqual(result["status"], "approved")
+        self.assertTrue(result["idle"])
+
+    def test_wait_returns_promptly_when_idle(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        start = time.monotonic()
+        result = prewalk_builder.wait(self.run, 30)
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertTrue(result["idle"])
+        self.assertEqual(result["status"], "AWAITING_NAVIGATOR")
+
+    def test_builder_note_surfaces_on_validation_failure(self):
+        self.make_plan(validation=f'"{sys.executable}" -c "raise SystemExit(1)"')
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        prewalk_builder.queue(self.run, "execute", "implement")
+        state = self.wait_status("VALIDATION_FAILED")
+        self.assertEqual(state["builder_note"],
+                         "appended hello from builder to hello.txt\nall plan constraints were respected")
+        self.assertIn("builder_note", prewalk_builder.summary(self.run))
+        self.assertTrue((self.run / "turn-001-reply.md").exists())
+
+    def test_idle_timeout_fails_the_run(self):
+        os.environ["PREWALK_BUILDER_IDLE_TIMEOUT"] = "1"
+        os.environ["PREWALK_MOCK_SLOW"] = "5"
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        prewalk_builder.queue(self.run, "execute", "implement")
+        state = self.wait_status("failed")
+        self.assertIn("timed out", state["error"])
+
+    def test_stream_activity_resets_idle_deadline(self):
+        os.environ["PREWALK_BUILDER_IDLE_TIMEOUT"] = "1"
+        os.environ["PREWALK_MOCK_STREAM"] = "4"
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        state = prewalk_builder.status(self.run)
+        self.assertEqual(state["status"], "READY_FOR_REVIEW")
+
+    def test_cancel_during_turn_ends_cancelled_and_keeps_worktree(self):
+        os.environ["PREWALK_MOCK_SLOW"] = "30"
+        os.environ["PREWALK_CANCEL_GRACE"] = "3"
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        prewalk_builder.queue(self.run, "execute", "implement")
+        deadline = time.monotonic() + 10
+        while prewalk_builder.status(self.run)["status"] != "EXECUTING":
+            if time.monotonic() > deadline:
+                self.fail("never started executing")
+            time.sleep(0.05)
+        prewalk_builder.queue(self.run, "cancel")
+        state = self.wait_status("cancelled", timeout=15)
+        self.assertTrue((self.run / "worktree").exists())
+        self.assertGreaterEqual(state["handled_command_seq"], 2)
+        self.assertTrue(prewalk_builder.is_idle(self.run))
+
+    def test_navigator_calls_and_record_usage_merge(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        self.cli("status", "--run-dir", str(self.run))
+        calls = [json.loads(line) for line in
+                 (self.run / "navigator-calls.jsonl").read_text().splitlines() if line.strip()]
+        self.assertTrue(any(c["command"] == "status" and c["stdout_chars"] > 0 for c in calls))
+        prewalk_builder.record_usage(self.run, "navigator", 100, 20, model="nav/m")
+        prewalk_builder.record_usage(self.run, "navigator", 50, 10, cache_read=5)
+        usage = json.loads((self.run / "usage.json").read_text())
+        nav = usage["navigator"]
+        self.assertEqual(nav["usage_status"], "recorded")
+        self.assertEqual(nav["totals"]["inputOther"], 150)
+        self.assertEqual(nav["totals"]["output"], 30)
+        self.assertEqual(nav["totals"]["inputCacheRead"], 5)
+        self.assertEqual(nav["models"], ["nav/m"])
+        self.assertEqual(nav["call_count"], 2)
+
+    def test_approved_run_writes_savings_report(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        prewalk_builder.queue(self.run, "approve")
+        self.wait_status("approved")
+        self.wait_file(self.run / "savings.json")
+        savings = json.loads((self.run / "savings.json").read_text())
+        self.assertEqual(savings["mode"], "unpriced")
+        self.assertIn("tokens", savings)
+        self.assertTrue((self.run / "savings.md").exists())
+        summary = prewalk_builder.summary(self.run)
+        self.assertEqual(summary["savings"]["mode"], "unpriced")
+        history = Path(os.environ["PREWALK_HOME"]) / "savings-history.jsonl"
+        self.assertTrue(history.exists())
+
+    def test_corrupt_prices_file_does_not_change_run_status(self):
+        prices = self.root / "prices.json"
+        prices.write_text("{corrupt", encoding="utf-8")
+        os.environ["PREWALK_PRICES_PATH"] = str(prices)
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        prewalk_builder.queue(self.run, "approve")
+        state = self.wait_status("approved")
+        self.wait_file(self.run / "savings.json")
+        savings = json.loads((self.run / "savings.json").read_text())
+        self.assertTrue(savings["errors"])
+        self.assertEqual(state["status"], "approved")
 
 
 if __name__ == "__main__":
