@@ -1,143 +1,381 @@
-# prewalk skill
+# Prewalk
 
-**prewalk** orchestrates a coding handoff across coding harnesses:
+Prewalk is an evidence-driven, cache-aware coding orchestrator. A strong **Navigator** classifies and plans, one persistent **Builder** implements and validates in an isolated Git worktree, and Navigator approves only the actual diff and verification evidence.
 
-**Navigator (the parent agent on any supported harness) → adapter selection and model/effort preflight → prewalk + first credible edit → Builder executor (a configured harness/model, possibly different from Navigator's) executes → runtime adapter extracts session and usage → Navigator reviews the actual diff.**
+It is not a single-prompt handoff anymore. The current protocol combines Navigator-only planning, persistent ACP sessions, pure-Git checkpoints, independent validation, compaction-time model routing, and explicit approval before any change returns to the original worktree.
 
-The core skill is harness-neutral. It contains no required vendor command, model name, provider, or manager. Host-specific launch, resume, permission, and usage details live in adapter documents under [`prewalk/adapters/`](prewalk/adapters/README.md).
+## Core guarantees
 
-```text
-Navigator (parent harness)
-  -> prewalk core: orient, confidence gate, one edit, adapter selection
-  -> adapters/<host>.md: launch, resume, permissions, artifacts
-  -> Builder process on the selected harness/model
-  -> scripts/prewalk_runtime.py inspect --host <host>:
-       final message, session identity, cumulative usage
-  -> Navigator review of the actual worktree diff
+- **No Builder before a plan.** Navigator finishes classification and planning before any Builder process or model call starts.
+- **One Builder, one session.** No parallel Builders and no best-of-N. Exploration and implementation reuse the same PID/session.
+- **No approval from prose.** Builder summaries and self-assessments are not acceptance evidence.
+- **Full diffs, always.** L0/L1/L2 checkpoints and complete patches are retained; failed worktrees are not silently deleted.
+- **No automatic merge.** A patch is applied to the original worktree only after explicit Navigator approval and `git apply --check`.
+- **No mandatory framework.** Core uses Python stdlib, Git, and the host CLI. LayerFS, Serena, MCP language servers, and LSP are optional enhancements, not requirements.
+
+## Architecture
+
+```mermaid
+flowchart TD
+    subgraph N["Navigator — strong model"]
+        A["Orient: Git, ripgrep, deterministic index"] --> B{"Classify"}
+        B -->|"brief_only"| C["Plan only; no Navigator edit"]
+        B -->|"sample_guided"| D["L0 + Navigator sample L1"]
+        B -->|"navigator_only"| E["Navigator implements directly; no Builder"]
+        C --> F["Complete plan and validation commands"]
+        D --> F
+    end
+
+    F --> G["Launch one persistent Builder"]
+    G --> H["Scoped exploration; no edits"]
+    H --> I["AWAITING_NAVIGATOR"]
+    I --> J["Execute in isolated Git worktree"]
+    J --> K["Independent validation and full diff"]
+    K --> L{"Navigator reviews evidence"}
+    L -->|"correction"| I
+    L -->|"route at compaction"| I
+    L -->|"approve"| M["Conflict check; apply base..final patch"]
+    L -->|"discard / take over"| N["Preserve or explicitly discard worktree"]
+    E --> O["Done"]
+    M --> O
+    N --> O
 ```
 
-## Supported adapters
+### Persistent Builder state machine
 
-| Host id | Harness | Validation status |
-| --- | --- | --- |
-| `codex` | Codex desktop/CLI | Launch, resume, and usage live-validated in prior managed runs. Not re-run by the harness-neutral change. |
-| `kimi` | Kimi Code | Launch, resume, session discovery, and usage live-validated in prior local runs. Not re-run by the harness-neutral change. |
-| `claude-code` | Claude Code 2.1.172 | Installed CLI inspected and an unauthenticated probe rejected; success, resume, and live cost paths are fixture-tested only. |
-| `dsh` | DeepSeek Harness | Fixture-tested only; DSH is not installed in this environment. |
-| `generic` | Any harness with a thin shim | Normalized contract plus fixture tests. Requires a host-specific shim; not automatic support. |
+```mermaid
+stateDiagram-v2
+    [*] --> PLANNED
+    PLANNED --> EXPLORING: launch after completed plan
+    EXPLORING --> AWAITING_NAVIGATOR: EXPLORATION_READY
+    AWAITING_NAVIGATOR --> EXECUTING: execute delta
+    AWAITING_NAVIGATOR --> AWAITING_NAVIGATOR: route at compaction
+    EXECUTING --> VALIDATING
+    EXECUTING --> FAILED: process error
+    VALIDATING --> READY_FOR_REVIEW: all checks pass
+    VALIDATING --> VALIDATION_FAILED: command failed
+    VALIDATION_FAILED --> EXECUTING: correction delta
+    READY_FOR_REVIEW --> EXECUTING: correction delta
+    READY_FOR_REVIEW --> [*]: approve or discard
+    VALIDATION_FAILED --> [*]: discard or take over
+    FAILED --> [*]: preserve or discard
+```
 
-An adapter's validation status is its own. Fixture-tested is not live-tested, and an adapter for one harness proves nothing about another. Do not describe Prewalk as universally live-tested or as supporting a harness merely because that harness can run a prompt.
-
-## Why adapters
-
-Core orchestration must not assume Codex, Kimi, Claude Code, DSH, a particular model vendor, or one manager's setup contract. Before model/effort dispatch, Navigator selects an adapter and validates its capabilities. Navigator and Builder may use different harnesses and models; the shared contract is the handoff package, phase markers, progress channel, and runtime-extracted artifacts.
-
-The optional repo-root `codex-deepseek-subagent` skill remains an optional host-specific manager for Codex. Core does not require it. See [`prewalk/adapters/codex.md`](prewalk/adapters/codex.md) for its linkage, sandbox constraints, and the reason a managed child process is used instead of Codex's native collaboration namespace.
+`EXPLORATION_READY` is a phase artifact, not a final response. The Builder process remains alive while Navigator works. A one-shot CLI resumed with `--session` preserves history but is not process persistence; such backends are marked `legacy` and must not claim the persistent contract.
 
 ## Install
 
-Install the `prewalk/` directory as a skill for the harness family you use:
+Install the `prewalk/` directory for your harness:
 
-- **Codex:** `~/.codex/skills/` or a project skill directory.
 - **Kimi Code:** `~/.agents/skills/prewalk/` or `<project>/.agents/skills/prewalk/`.
+- **Codex:** `~/.codex/skills/` or a project skill directory.
 - **Claude Code:** `~/.claude/skills/prewalk/` or `<project>/.claude/skills/prewalk/`.
-- **DSH:** load the core through its native profile/plugin/prompt mechanism. DSH is plugin-based; do not assume it auto-discovers Agent Skills, and do not invent a plugin manifest.
-- **Other harnesses:** keep the native harness and add a thin shim that emits the normalized envelope in [`prewalk/adapters/README.md`](prewalk/adapters/README.md), then use `prewalk_runtime.py inspect --host generic`.
+- **DSH:** load the core through its native profile/plugin mechanism; do not assume automatic Agent Skills discovery.
+- **Other harnesses:** add a thin shim using the normalized contract in [`prewalk/adapters/README.md`](prewalk/adapters/README.md).
 
-The skill is self-contained for orchestration. The runtime adapter is stdlib-only and needs Python 3.11+. A Builder adapter may additionally depend on a host-specific manager, credentials, or runtime; that dependency belongs to the adapter document, not to core.
+Requirements:
 
-## Setup
+- Python 3.11+ and Git. If Windows has no `python3` command, use `python` or `py` instead.
+- A ready Builder backend when delegating. There is no mandatory `doctor → setup → test` wizard.
+- For the verified persistent path, Kimi Code CLI with Desktop OAuth. Legacy adapters have their own requirements documented under `prewalk/adapters/`.
 
-Quick start is read-only model discovery, not a setup wizard:
-
-```sh
-python3 prewalk/scripts/prewalk.py models --navigator-host kimi  # list usable Builder models/efforts; no config writes
-```
-
-Prewalk then asks one model/effort preflight: Navigator defaults to the current session's model and effective effort; Builder defaults to an available weak model with `medium` effort when supported, otherwise effort is reported as not settable. `doctor`, `setup`, and `test` are optional diagnostics, not prerequisites. A ready saved config may supply a Builder default but is never required. Backends, blocked models, effort mapping, and what is not yet live-verified: [`prewalk/references/backends.md`](prewalk/references/backends.md).
-
-Handle connection setup only if the selected backend actually fails to launch because authentication or endpoint configuration is missing. A valid existing configuration is reused without asking again; credentials are never written to a handoff, progress file, log, or commit.
-
-Configuring a provider or endpoint is not proof that a requested model or effort works. Keep the core preflight and validate the actual launch values.
-
-## Usage
-
-Ask in plain language, for example:
-
-```text
-[$prewalk] 把这三个批改问题修掉，测试由默认模型进行
-```
-
-Navigator classifies and plans before any Builder starts, writes L1 only for `sample_guided`, then launches one persistent Builder in an isolated Git worktree. The same PID/session handles scoped checks, implementation, and validation without a cold start. Navigator approves only actual diff and validation evidence; no Builder prose or automatic merge is required. The full protocol is in [`prewalk/references/builder-fusion.md`](prewalk/references/builder-fusion.md).
-
-### First use
-
-Prewalk asks connection questions only when the selected executor is missing, incomplete, or the user wants to change the endpoint. Questions are grouped so the user is not interrupted once per run. A ready configuration is reused without asking again.
-
-### Live progress
-
-Every task gets one run directory outside the repository containing the handoff, per-turn event/final artifacts, `progress.jsonl`, and stderr; the same directory is reused across resumed turns. Builder appends one JSON event at start, on each TODO transition, before and after long commands, and on completion or escalation; the format is in [prewalk/references/progress-format.md](prewalk/references/progress-format.md). Navigator reports the run directory and background task ID, reads only the new tail at natural checkpoints, and does not busy-poll.
-
-This is a snapshot protocol: progress is self-reported status and raw output remains the tool-level detail. A missing or stale file is not proof of a hung child. The host's background-task panel shows process state, but there is no native live subagent panel in the parent chat; when the parent turn ends, updates pause until the next user message or completion notification. Final proof is still Navigator's inspection of the actual diff.
-
-### Session continuity and usage
-
-Prewalk keeps one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, permission boundary, and adapter. The first dispatch is the only full handoff. Later supplements, escalation decisions, and rework resume the recorded session with a small `PREWALK_PHASE: BUILDER_RESUME` delta — legacy `DEEPSEEK_RESUME` is accepted for existing sessions — carrying the unchanged `HANDOFF_ID`, expected Builder session id, new decision/evidence, current TODO state, and progress path. The protocol is in [prewalk/references/session-continuity.md](prewalk/references/session-continuity.md).
-
-Each run directory holds:
-
-- `run.json` — non-secret routing state: `HANDOFF_ID`, Navigator host (`navigator_host`), Builder adapter host (`adapter_host`), session id, workspace/branch, model/effort, permission boundary, next turn, and artifact paths.
-- `turn-NNN-events.jsonl` / `turn-NNN.err` — native (or normalized generic) per-turn event stream and stderr; never overwritten by a later turn.
-- `turn-NNN-final.txt` — final assistant message extracted by the runtime adapter; do not hand-parse a stream or substitute a draft.
-- `progress.jsonl` — cumulative Builder progress; `seq` continues across turns and events carry an optional `turn` (Builder turn number, not a model-call index).
-- `usage.json` — cumulative schema_version 2 state: `calls` holds raw model-call records with `builder_turn`, model/time/scope/raw usage/ratio and any validated cost with status and scope; `turns` holds one aggregate per Builder turn with `call_count`, source events, aggregated token counts and ratio. Top-level `call_count` and `turn_count` are separate.
-
-After every turn, run the stdlib-only runtime adapter in `prewalk/scripts/prewalk_runtime.py` with `--host <adapter-host>` and the same cumulative `usage.json`:
+Run read-only model discovery first:
 
 ```sh
-python prewalk/scripts/prewalk_runtime.py inspect --host <adapter-host> --builder-turn 2 --events "<run-dir>/turn-002-events.jsonl" --expected-session "<session-id>" --final-message "<run-dir>/turn-002-final.txt" --usage "<run-dir>/usage.json"
+python3 prewalk/scripts/prewalk.py models --navigator-host kimi
 ```
 
-For `--builder-turn` greater than 1, `--expected-session` and the existing cumulative usage file are required prior state. The adapter extracts the session id and final message, rejects an unexpected session id, rejects schema/session/wire-count mismatches without overwriting outputs, and merges earlier Builder turns. Re-inspecting the same Builder turn replaces its aggregate rather than duplicating it; an older turn is never rewritten once a later one is recorded. Host-specific usage extraction is documented in each adapter; missing usage means `unavailable`, not zero. Cost is recorded only from a valid host value and is labeled `reported`, `estimated`, or `unavailable`, with scope `call` or `session_cumulative`. A client-side estimate is not an invoice; a session-cumulative estimate is retained as the latest value and never summed across turns.
-
-Observability limits: a resumable session preserves conversation state but does not guarantee a warm provider cache. Token counts do not prove a cache hit rate or savings, and adapters use different denominators. Prewalk records the observed evidence and does not claim a general cache improvement. No keepalive prompts or forced compaction are used to chase cache; model/effort changes are preferred at natural compaction or execution boundaries but never postponed when correctness requires them.
-
-### Adapter details
-
-- [Codex](prewalk/adapters/codex.md)
-- [Kimi Code](prewalk/adapters/kimi.md)
-- [Claude Code](prewalk/adapters/claude-code.md)
-- [DSH](prewalk/adapters/dsh.md)
-- [Generic shim contract](prewalk/adapters/README.md)
-
-## Canonical and legacy phase markers
-
-New packages use `PREWALK_PHASE: BUILDER_EXECUTE`, `PREWALK_PHASE: BUILDER_RESUME`, and `PREWALK_PHASE: NAVIGATOR_REVIEW`. Existing sessions and external manager scripts may still use `DEEPSEEK_EXECUTE`, `DEEPSEEK_RESUME`, `LUNA_EXECUTE`, and `SOL_REVIEW`; all are accepted as the corresponding phases. Do not rename markers in scripts outside this skill.
-
-## Notes
-
-- No adapter is presented as universally live-tested. Check the validation-status column and the adapter document before claiming support.
-- DSH is plugin-based; its adapter requires the operator to load the core through the native mechanism and is fixture-only here.
-- A harness without a shim is not supported by copying `SKILL.md`; use the normalized generic contract and test the shim's session and completion evidence.
-- The optional `codex-deepseek-subagent` manager remains at the repository root and is not required by the neutral core.
-
-## Repo layout
+Example output:
 
 ```text
-prewalk/                       # harness-neutral orchestration skill
-  SKILL.md
-  adapters/
-    README.md                  # adapter contract and generic shim envelope
-    codex.md
-    kimi.md
-    claude-code.md
-    dsh.md
-    codex/openai.yaml          # Codex host metadata, outside generic core
+kimi-sub (persistent): models=kimi-code/kimi-for-coding, kimi-code/k3-256k; default=kimi-code/kimi-for-coding/low; efforts=low, high, max
+```
+
+Navigator defaults to the **current session's model and effective effort**. Builder is chosen from the available models, with `medium` when supported or the backend's documented default. No configuration file is required; a ready saved configuration may supply a Builder default.
+
+## Quick start
+
+Use a run directory **outside** the source worktree. The example uses `/tmp/prewalk-run` and `/path/to/repo`.
+
+### 1. Optional: generate one deterministic index
+
+```sh
+python3 prewalk/scripts/prewalk_explore.py \
+  --cwd /path/to/repo \
+  --run-dir /tmp/prewalk-run \
+  --scope src/ \
+  --entry RelevantSymbol
+```
+
+This writes `exploration-index.json` and a small `nav-digest.json`. Navigator reads the digest for classification; Builder queries the full index only as needed. No code snippets are embedded in the index.
+
+### 2. Create the plan
+
+For a mechanical, verifiable task:
+
+```sh
+python3 prewalk/scripts/prewalk_plan.py create \
+  --run-dir /tmp/prewalk-run \
+  --handoff-id demo \
+  --mode brief_only \
+  --goal "Extend the existing handler pattern to the remaining handlers" \
+  --success "All handlers follow the same pattern and tests pass" \
+  --scope "src/handlers/" \
+  --cwd /path/to/repo \
+  --validation "python3 -m unittest discover -s tests" \
+  --model kimi-code/kimi-for-coding \
+  --effort low
+```
+
+Modes:
+
+- `brief_only`: no Navigator code edit; L0 is captured automatically at launch.
+- `sample_guided`: Navigator makes one coherent L1 sample edit before launch.
+- `navigator_only`: Navigator completes the work directly; do not launch Builder.
+
+For `sample_guided`, capture the baseline and the sample:
+
+```sh
+python3 prewalk/scripts/prewalk_layers.py snapshot \
+  --run-dir /tmp/prewalk-run --handoff-id demo \
+  --cwd /path/to/repo --layer L0 --message "inherited baseline"
+
+# Navigator makes exactly one coherent sample edit, then:
+python3 prewalk/scripts/prewalk_layers.py snapshot \
+  --run-dir /tmp/prewalk-run --handoff-id demo \
+  --cwd /path/to/repo --layer L1 --message "Navigator sample edit"
+```
+
+The complete `first-edit.patch` is preserved. `sample_guided` cannot launch without L1.
+
+### 3. Launch and wait for the live handoff point
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py launch \
+  --run-dir /tmp/prewalk-run \
+  --plan /tmp/prewalk-run/plan.json \
+  --backend kimi-sub
+
+python3 prewalk/scripts/prewalk_builder.py status --run-dir /tmp/prewalk-run
+```
+
+Wait until status is `AWAITING_NAVIGATOR`, then send a short execute delta:
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py execute \
+  --run-dir /tmp/prewalk-run \
+  --text "Implement the approved plan within the declared scope"
+```
+
+The supervisor creates a separate worktree based on L1 when present, otherwise L0. The original HEAD, index, and worktree remain untouched.
+
+### 4. Review evidence and decide
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py review --run-dir /tmp/prewalk-run
+```
+
+Inspect:
+
+- `builder-review.patch` and `builder-review.json`;
+- `validation/` command records, exit codes, stdout, and stderr;
+- actual ACP configuration and usage evidence when available.
+
+Approve or explicitly discard:
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py approve --run-dir /tmp/prewalk-run
+
+# Or, after a deliberate decision:
+python3 prewalk/scripts/prewalk_builder.py discard --run-dir /tmp/prewalk-run
+```
+
+Approval checks the patch for conflicts before applying it to the original worktree. Failure does not silently merge or delete the failed layer.
+
+For a correction, send another `execute` delta to the same live Builder. For a model/effort change at a real compaction point:
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py route \
+  --run-dir /tmp/prewalk-run \
+  --model kimi-code/k3-256k \
+  --effort high \
+  --reason "Mechanical work with a larger remaining scope" \
+  --compaction-id compact-1
+```
+
+Routing keeps the same ACP session and PID and writes `continuation-compact-1.json` plus `routes.jsonl`. It is not a hidden cold start.
+
+## Feature guide
+
+### Navigator-only planning and navigation
+
+- Three delegation modes: `brief_only`, `sample_guided`, and `navigator_only`.
+- Git/ripgrep-first exploration with targeted hunk reading.
+- One optional deterministic index containing paths, lines, symbols, relations, and notes, not code dumps.
+- Separate `nav-digest.json` for inexpensive classification: counts, risks, candidate L1, tests, and uncertainty.
+- No Builder process or model call is used to solve Navigator's classification problem.
+- No LSP is required. Serena and MCP language servers are optional alternatives for more precise references.
+
+### Persistent execution and cache efficiency
+
+- One long-lived ACP process/session from scoped exploration through validation.
+- Live `AWAITING_NAVIGATOR`, not a new process or one-shot resume.
+- Stable `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY` prefix; only trailing phase instructions and deltas vary.
+- Content hashes for plan, index, review patches, and continuations; identical content is not rebuilt or rewritten, and volatile timestamps are excluded.
+- Append-only execute deltas and command history; no repeated full plan, exploration payload, or diff on resume.
+- `execution_count`, `cold_starts`, `route_count`, prompt/delta sizes, and rework/failure signatures are recorded.
+- No synthetic keepalive prompts and no forced compaction. Provider cache TTL still applies.
+
+### Pure-Git isolation and complete diffs
+
+- **L0:** inherited worktree before Navigator edits, including pre-existing dirty changes.
+- **L1:** optional Navigator sample, required only for `sample_guided`.
+- **L2-<n>:** Builder progress and final checkpoints; a batch may contain multiple steps, and correctness is based on complete captured changes rather than layer count.
+- Separate Builder worktree; Navigator and Builder never edit concurrently.
+- Failed layers remain available for diagnosis, salvage, takeover, or explicit discard.
+- Approval uses the L1 base when present, otherwise L0, then applies `base..final` only after a conflict check.
+- Real HEAD, branch, index, and original worktree are not modified during execution.
+
+### Evidence-only acceptance
+
+- Independent validation commands run by the supervisor, with command, cwd, exit code, timestamps, and raw output paths.
+- Navigator reads actual patches and validation evidence, not Builder summaries or `CHANGED`/`VALIDATION` claims.
+- No diff or no verification means no approval, even if Builder says everything passed.
+- `READY_FOR_REVIEW` is required before `approve`; failed validation blocks merge.
+- Merge conflicts preserve both the failed layer and the independently changed source.
+
+### Model registry and preflight
+
+| Backend | Mode | Default and alternate models | Effort | Validation status |
+| --- | --- | --- | --- | --- |
+| `kimi-sub` | Persistent ACP | `kimi-code/kimi-for-coding`, `kimi-code/k3-256k` | `low`, `high`, `max`; default `low` | ACP and Desktop OAuth live-verified |
+| `claude-code-sub` | Legacy | `sonnet`, `haiku` | `low` through `max`, default `medium` | Fixture-tested argv/env; not live-run |
+| `codex-sub` | Legacy | `gpt-6-luna`, `gpt-6.1-terra` | `low` through `max`, default `high` | Fixture-tested; effort key and Luna availability unverified |
+| `codex-deepseek` | Legacy, explicit only | `deepseek-flash` | `low`, `medium`, `high` | Optional host-specific manager |
+| `opencode-api`, `pi-api` | Stub | DeepSeek | — | Registry entries only; launch not implemented |
+| `mock` | Hidden test backend | Mock models | Mock only | Used by the offline test suite |
+
+Additional rules:
+
+- Track A automatic recommendations require subscription billing, not an API-key login.
+- Blocked as Builder: Claude `best`, `fable`, `opus*`, `opusplan`, `default`; Codex Sol/Astra; Kimi `kimi-for-coding-highspeed`.
+- Unsupported effort maps only downward. A request below the backend minimum is rejected; it never rounds up.
+- Model/effort selection is validated at launch. Configuration alone is not proof of effective routing.
+
+### Compaction-time routing and cost observability
+
+- Ordinary compile/test failures stay with the same Builder; effort is not raised on the first failure.
+- Repeated equivalent failures can produce `upgrade_builder_at_compaction` as a recommendation.
+- Mechanical work may upgrade Builder at natural compaction; requirement, architecture, scope, or L1-direction decisions return to Navigator.
+- Continuations contain only goal, constraints, Git refs/diffs, remaining work, failed commands, decisions, and permission boundary, never a full transcript.
+- `routes.jsonl` records from/to model and effort, reason, compaction id, and same-PID/session evidence.
+- `usage.json` separates Builder usage from Navigator `not_collected`; missing usage is `unavailable` or `not_collected`, never zero.
+- Cost is assessed per accepted task, including rework and final review quality, not just model unit price.
+
+### Environment, integrity, and secrets
+
+- Builder environments strip foreign API keys, auth tokens, base URLs, and model overrides while preserving Desktop OAuth configuration such as `KIMI_CODE_HOME`.
+- Environment removal is case-insensitive on Windows.
+- Executable path, size, and SHA256 are recorded and checked before execute and approval. This detects changes during the run; it does not claim vendor-signature verification.
+- ACP `configOptions.currentValue` records the model the CLI actually accepted, independently of requested or usage-reported models. Mismatches become warnings.
+- Prewalk config contains only backend/model/effort/concurrency and preferences, not credentials. POSIX config writes use mode `0600`; Windows does not provide POSIX permission semantics.
+- The run directory must be outside the source worktree, and the run directory is granted separately to the ACP session for patch/index access.
+
+### Legacy orchestration and runtime compatibility
+
+The repository still includes the earlier one-shot/adapter protocol for non-persistent hosts:
+
+- Harness-neutral adapters for Codex, Kimi, Claude Code, DSH, and a normalized generic shim.
+- Resumable sessions with expected-session validation and legacy phase markers: `DEEPSEEK_EXECUTE`, `DEEPSEEK_RESUME`, `LUNA_EXECUTE`, and `SOL_REVIEW`.
+- `prewalk_async.py` detached supervision, incremental status, steer, cancel, retry, rate-limit waiting, and concurrency control.
+- Pure-Git layer reviews with `review.md`, `review.json`, and `review-L0-final.patch`.
+- `prewalk_runtime.py inspect` for session identity, final-message extraction, and cumulative schema_version 2 usage.
+- Separate model-call and Builder-turn accounting, per-turn aggregates, cache ratios, and cost status/scope where exposed. Client-side cost estimates are not invoices and cumulative estimates are not summed.
+- Windows process-group handling, native PID liveness, file locks, and bounded retries for transient state-file sharing violations.
+
+Legacy compatibility does not make one-shot session resume equivalent to a live persistent Builder. See [`prewalk/references/async-mode.md`](prewalk/references/async-mode.md), [`prewalk/references/session-continuity.md`](prewalk/references/session-continuity.md), and the adapter documents.
+
+## Run directory reference
+
+| Artifact | Purpose |
+| --- | --- |
+| `plan.json` | Validated mode, goal, scope, acceptance, model/effort, and validation commands |
+| `exploration-index.json` | Optional full deterministic navigation index for on-demand queries |
+| `nav-digest.json` | Small classification view for Navigator |
+| `first-edit.patch` | Complete L0..L1 patch when L1 exists |
+| `layers.json` | L0, optional L1, L2 checkpoints and snapshot errors |
+| `state.json` | Phase, PID/session, worktree, model/integrity evidence, counts, and errors |
+| `commands.jsonl` | Append-only execute/route/approve/discard commands |
+| `builder-events.jsonl`, `builder.err` | Native ACP events and stderr |
+| `builder-review.patch`, `builder-review.json` | Actual base..final diff, content hash, changed paths, and validation summary |
+| `validation/` | Independent command records, stdout, and stderr |
+| `usage.json` | Builder usage plus Navigator `not_collected` |
+| `builder-usage.json` | Cumulative Kimi wire usage when available |
+| `routes.jsonl` | Launch and compaction-routing evidence |
+| `continuation-<id>.json` | Compact routing state, never a transcript |
+| `progress.jsonl` | Bounded machine events read by sequence |
+| `mock-session.json` | Test-only ACP mock evidence |
+
+## Validation and development
+
+Run the full suite:
+
+```sh
+python3 -m unittest discover -s prewalk/tests
+```
+
+Current evidence:
+
+- **176 tests pass**, with one POSIX-only process-group test skipped on Windows.
+- Real Kimi ACP verification used exactly two prompts on one PID/session: complete L1 preservation, exact Builder output, only `hello.txt` changed, independent validation passed, approval applied, and HEAD/index unchanged.
+- Additional checks cover unchanged-content writes, stable prefixes, environment sanitization, executable changes, model mismatches, failed validation, crashes, batched snapshots, and merge conflicts.
+
+Validation status is backend-specific. These results do not mean every adapter or feature has been live-tested.
+
+## Compatibility and limitations
+
+- **Kimi ACP is the verified persistent backend.** Other backends are `legacy` unless they implement the same live-session contract.
+- `opencode-api` and `pi-api` are registry stubs, not launch-ready.
+- Claude/Codex subscription argv/env behavior is fixture-tested; exact live flags, plan quotas, and Codex effort configuration are not universally verified.
+- Cache hits and savings are provider- and TTL-dependent. Prewalk records evidence rather than claiming a fixed improvement.
+- Compaction routing currently combines Navigator commands with deterministic failure evidence; it is not an autonomous general-purpose classifier.
+- DSH is fixture-tested only and uses its native plugin mechanism.
+- Core needs no vendor manager, but the optional `codex-deepseek-subagent` remains available for its host-specific Codex/DeepSeek surface.
+
+## Repository layout
+
+```text
+prewalk/
+  SKILL.md                         # Orchestration instructions
+  adapters/                        # Host-specific launch/resume/usage contracts
   references/
-    handoff-format.md
-    progress-format.md
-    session-continuity.md
-  scripts/prewalk_runtime.py   # inspect: session, final message, cumulative usage
-  tests/test_prewalk_runtime.py
-codex-deepseek-subagent/       # optional host-specific Codex manager
+    builder-fusion.md              # Full persistent protocol
+    backends.md                    # Backend registry and validation status
+    async-mode.md                  # Legacy detached supervisor
+    handoff-format.md              # Legacy handoff format
+    progress-format.md             # Machine progress records
+    session-continuity.md          # Legacy session boundaries
+  scripts/
+    prewalk.py                     # models, doctor, setup, optional self-test
+    prewalk_explore.py             # Deterministic index and Navigator digest
+    prewalk_plan.py                # Plan creation and validation
+    prewalk_builder.py             # Persistent supervisor, validation, review, approval
+    prewalk_hash.py                # Content fingerprints and change-only writes
+    prewalk_layers.py              # Pure-Git checkpoints
+    prewalk_async.py               # Legacy detached supervisor
+    prewalk_runtime.py             # Legacy session/final-message/usage inspection
+    prewalk_prefs.py               # Model/effort preferences
+    prewalk_config.py              # Non-secret saved configuration
+    persistent_backends/           # ACP JSON-RPC and persistent mock
+    builder_backends/              # Backend registry and legacy adapters
+  tests/                           # Unit and end-to-end offline suites
+codex-deepseek-subagent/          # Optional host-specific Codex manager
 ```
+
+## Protocol references
+
+- [Persistent Builder design](prewalk/references/builder-fusion.md)
+- [Backend registry and validation status](prewalk/references/backends.md)
+- [Legacy async mode](prewalk/references/async-mode.md)
+- [Session continuity](prewalk/references/session-continuity.md)
+- [Adapter contract and generic shim](prewalk/adapters/README.md)
