@@ -158,6 +158,8 @@ python "<installed-prewalk>/scripts/prewalk_builder.py" review --run-dir "<run-d
 
 Wait for `AWAITING_NAVIGATOR` before `execute`; this is a live wait in the same PID/session, not a new Builder process. The supervisor creates an isolated worktree based on L1 when present, otherwise L0. It retains full diffs, independently runs the plan's validation commands, and writes `builder-review.patch/json` plus `validation/` records. Do not read Builder's prose summary or treat it as evidence.
 
+Plans, indexes, patches, and continuations use content hashes so identical content is not rebuilt or rewritten. Every prompt starts with the stable `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY` prefix; only phase instructions and deltas vary. Builder environments strip other providers' credentials and model overrides while preserving Desktop OAuth configuration. The supervisor records executable path/size/SHA256 and ACP `currentValue` model evidence, and rechecks integrity before execute/approve. Hash evidence proves the binary did not change during the run, not vendor authenticity. Usage is recorded per role when the host exposes it; missing usage is `unavailable` or `not_collected`, never zero or proof of model identity.
+
 Navigator reviews the actual patch and validation evidence, then explicitly approves or discards. Approval runs `git apply --check` before applying `base..final` to the original worktree; nothing merges automatically. Failed worktrees remain for diagnosis until Navigator explicitly discards or salvages them.
 
 ```sh

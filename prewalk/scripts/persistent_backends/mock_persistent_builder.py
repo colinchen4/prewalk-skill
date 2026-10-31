@@ -14,7 +14,10 @@ SESSION = f"mock-session-{os.getpid()}"
 TRACE = Path(os.environ["PREWALK_MOCK_TRACE"])
 TRACE.parent.mkdir(parents=True, exist_ok=True)
 STATE: dict[str, Any] = {"session_id": SESSION, "pid": os.getpid(), "prompts": [],
-                         "model": "mock-ok", "thinking": "medium", "mode": "default"}
+                         "model": "mock-ok", "thinking": "medium", "mode": "default",
+                         "leaked_env": sorted(key for key in (
+                             "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+                             "DEEPSEEK_API_KEY", "KIMI_API_KEY", "KIMI_MODEL") if key in os.environ)}
 
 
 def send(message: dict[str, Any]) -> None:
@@ -28,12 +31,19 @@ def trace() -> None:
     tmp.replace(TRACE)
 
 
+def config_options() -> list[dict[str, str]]:
+    return [{"id": "model", "currentValue": STATE["model"]},
+            {"id": "thinking", "currentValue": STATE["thinking"]}]
+
+
 def result(request_id: Any, payload: dict[str, Any]) -> None:
     send({"jsonrpc": "2.0", "id": request_id, "result": payload})
 
 
 def prompt(text: str) -> None:
-    phase = text.splitlines()[0] if text else ""
+    current = next((line for line in text.splitlines() if line.startswith("CURRENT_PHASE:")), "")
+    phase = current.removeprefix("CURRENT_PHASE:").strip()
+    phase = f"PREWALK_PHASE: {phase}" if phase else ""
     STATE["prompts"].append({"phase": phase, "chars": len(text),
                              "sha256": hashlib.sha256(text.encode()).hexdigest()})
     if phase == "PREWALK_PHASE: EXPLORING":
@@ -63,10 +73,10 @@ def main() -> None:
         if method == "initialize":
             result(request_id, {"protocolVersion": 1, "agentCapabilities": {}})
         elif method == "session/new":
-            result(request_id, {"sessionId": SESSION, "configOptions": []})
+            result(request_id, {"sessionId": SESSION, "configOptions": config_options()})
         elif method == "session/set_config_option":
             STATE[params["configId"] if params["configId"] != "model" else "model"] = params["value"]
-            result(request_id, {"configOptions": []})
+            result(request_id, {"configOptions": config_options()})
             trace()
         elif method == "session/set_mode":
             STATE["mode"] = params["modeId"]

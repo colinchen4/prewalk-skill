@@ -88,6 +88,8 @@ class PersistentBuilderTests(unittest.TestCase):
         return state
 
     def test_brief_only_uses_same_session_and_merges_after_approval(self):
+        os.environ["ANTHROPIC_API_KEY"] = "sentinel"
+        os.environ["DEEPSEEK_API_KEY"] = "sentinel"
         self.make_plan()
         launched = prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
         first = self.execute_and_wait_ready()
@@ -95,9 +97,14 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual(first["builder_pid"], state["builder_pid"])
         self.assertEqual(first["session_id"], state["session_id"])
         self.assertEqual(state["cold_starts"], 1)
+        self.assertEqual(state["integrity_status"], "verified")
+        self.assertEqual(len(state["cli_integrity"]["sha256"]), 64)
         review = prewalk_builder.build_review(self.run)
         self.assertTrue(review["has_diff"])
         self.assertTrue(review["validation_passed"])
+        repeated = prewalk_builder.build_review(self.run)
+        self.assertTrue(repeated["patch_unchanged"])
+        self.assertEqual(repeated["patch_sha256"], review["patch_sha256"])
         prewalk_builder.queue(self.run, "approve")
         self.wait_status("approved")
         self.assertEqual((self.repo / "hello.txt").read_text(), "base\nhello from builder\n")
@@ -108,6 +115,7 @@ class PersistentBuilderTests(unittest.TestCase):
                          ["PREWALK_PHASE: EXPLORING", "PREWALK_PHASE: EXECUTE"])
         self.assertEqual(trace["session_id"], state["session_id"])
         self.assertEqual(trace["pid"], state["builder_pid"])
+        self.assertEqual(trace["leaked_env"], [])
         self.assertEqual(launched["supervisor_pid"], state["supervisor_pid"])
 
     def test_sample_guided_retains_complete_l1_patch(self):
@@ -145,6 +153,8 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual(after["cold_starts"], 1)
         self.assertEqual(after["model"], "mock-strong")
         self.assertEqual(after["effort"], "high")
+        self.assertEqual(after["model_status"], "verified")
+        self.assertEqual(after["config_evidence"]["model"], "mock-strong")
         self.assertTrue((self.run / "continuation-compact-1.json").exists())
         trace = json.loads((self.run / "mock-session.json").read_text())
         self.assertEqual(trace["model"], "mock-strong")

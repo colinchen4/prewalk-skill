@@ -15,6 +15,7 @@ from typing import Any
 
 import persistent_backends
 import prewalk_async
+import prewalk_hash
 import prewalk_layers
 import prewalk_plan
 import prewalk_runtime
@@ -49,7 +50,8 @@ def _event(run_dir: Path, event: dict[str, Any]) -> None:
 
 
 def phase_prompt(plan: dict[str, Any], run_dir: Path, phase: str, delta: str = "") -> str:
-    lines = [f"PREWALK_PHASE: {phase}", f"HANDOFF_ID: {plan['handoff_id']}", "",
+    lines = ["PREWALK_PHASE: PERSISTENT_BUILDER", f"HANDOFF_ID: {plan['handoff_id']}",
+             f"SESSION_CACHE_KEY: prewalk/{plan['handoff_id']}", "",
              f"GOAL: {plan['goal']}", "SUCCESS:", *[f"- {item}" for item in plan["success"]],
              "FILE SCOPE:", *[f"- {item}" for item in plan["scope"]]]
     if plan.get("context"):
@@ -59,6 +61,7 @@ def phase_prompt(plan: dict[str, Any], run_dir: Path, phase: str, delta: str = "
         lines.append(f"EXECUTION INDEX: {index}; query only what you need")
     if (run_dir / "first-edit.patch").exists():
         lines.append(f"FIRST_EDIT_PATCH: {run_dir / 'first-edit.patch'}; read the complete patch")
+    lines.append(f"CURRENT_PHASE: {phase}")
     if phase == "EXPLORING":
         lines += ["Do not edit any file. Check only definitions, references, and tests inside scope.",
                   "Return EXPLORATION_READY and any concrete contradiction, then wait for EXECUTE.",
@@ -113,6 +116,7 @@ def launch(run_dir: Path, plan_path: Path, backend_id: str) -> dict[str, Any]:
                  "model": plan.get("model"), "effort": plan.get("effort"),
                  "source_worktree": str(source), "builder_worktree": str(builder_wt),
                  "base_layer": base_layer, "base_sha": base_sha, "plan": str(plan_path),
+                 "cache_key": f"prewalk/{plan['handoff_id']}",
                  "created_at": _now(), "cold_starts": 1}
         _write_state(run_dir, state)
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_supervise",
@@ -165,16 +169,57 @@ def build_review(run_dir: Path) -> dict[str, Any]:
     entries = prewalk_layers.manifest(Path(state["builder_worktree"]), base, final["sha"])
     patch = prewalk_layers.git(Path(state["builder_worktree"]), "diff", "--no-renames", base, final["sha"])
     patch_path = run_dir / "builder-review.patch"
-    prewalk_runtime._atomic_write_text(patch_path, patch)
+    patch_unchanged = prewalk_hash.write_text_if_changed(patch_path, patch)
     validations = []
     for path in sorted((run_dir / "validation").glob("*.json")):
         validations.append(json.loads(path.read_text(encoding="utf-8")))
     report = {"ok": True, "base": base, "final": final["sha"], "changed": entries,
               "validation": validations, "patch": str(patch_path),
+              "patch_sha256": prewalk_hash.sha256_text(patch), "patch_unchanged": patch_unchanged,
               "has_diff": bool(entries), "validation_passed": bool(validations) and all(
                   record["exit_code"] == 0 for record in validations)}
     prewalk_runtime._atomic_write_json(run_dir / "builder-review.json", report)
     return report
+
+
+def record_config_evidence(state: dict[str, Any], backend: persistent_backends.JsonRpcBackend) -> None:
+    evidence = backend.current_config()
+    state["config_evidence"] = evidence
+    actual = evidence.get("model")
+    state["observed_model"] = actual
+    requested = state.get("model")
+    if requested and actual == requested:
+        state["model_status"] = "verified"
+        state.pop("model_warning", None)
+    elif requested and actual and actual != requested:
+        state["model_status"] = "warning"
+        state["model_warning"] = f"requested {requested}, ACP reports {actual}"
+    else:
+        state["model_status"] = "unverified"
+
+
+def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
+    if state["backend"] != "kimi-sub":
+        state["usage_status"] = "unavailable"
+        return
+    session = state["session_id"]
+    events = run_dir / "builder-events.jsonl"
+    direct_path = run_dir / "builder-usage.json"
+    try:
+        prior = prewalk_runtime._load_prior_usage(direct_path, "kimi", session, turn) if turn > 1 else None
+        usage = prewalk_runtime._kimi_usage(session, Path(state["builder_worktree"]), turn, prior, events)
+    except (prewalk_runtime.InspectError, OSError, ValueError) as exc:
+        usage = {"usage_status": "unavailable", "usage_error": str(exc), "models": []}
+    prewalk_runtime._atomic_write_json(direct_path, usage)
+    prewalk_runtime._atomic_write_json(run_dir / "usage.json", {
+        "builder": usage, "navigator": {"usage_status": "not_collected"}})
+    state["usage_status"] = usage["usage_status"]
+    state["cache_usage"] = usage.get("totals")
+    state["observed_models"] = usage.get("models") or []
+    requested = state.get("model")
+    if requested and state["observed_models"] and requested not in state["observed_models"]:
+        state["model_status"] = "warning"
+        state["model_warning"] = f"requested {requested}, usage reports {state['observed_models']}"
 
 
 def apply_review(run_dir: Path) -> None:
@@ -205,7 +250,7 @@ def write_continuation(run_dir: Path, command: dict[str, Any]) -> Path:
                     "builder_worktree": state["builder_worktree"], "status": state["status"],
                     "failed_validation": failures}
     path = run_dir / f"continuation-{command['compaction_id']}.json"
-    prewalk_runtime._atomic_write_json(path, continuation)
+    prewalk_hash.write_json_if_changed(path, continuation)
     return path
 
 
@@ -252,6 +297,9 @@ def supervise(run_dir: Path) -> int:
         backend = persistent_backends.create_backend(state["backend"], run_dir / "worktree", run_dir,
                                                       state.get("model"), state.get("effort"))
         session = backend.start(state.get("model"), state.get("effort"))
+        record_config_evidence(state, backend)
+        state["cli_integrity"] = backend.integrity
+        state["integrity_status"] = "verified"
         state.update(status="EXPLORING", phase="EXPLORING", supervisor_pid=os.getpid(),
                      builder_pid=backend.pid, session_id=session, started_at=_now())
         _write_state(run_dir, state)
@@ -263,6 +311,7 @@ def supervise(run_dir: Path) -> int:
                                    {"action": "launch", "to_model": state.get("model"),
                                     "to_effort": state.get("effort"), "reason": "planned backend"})
         backend.prompt(explore_prompt)
+        collect_usage(run_dir, state, 1)
         prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
                                 "builder", "scoped exploration", skip_if_unchanged=True)
         state.update(status="AWAITING_NAVIGATOR", phase="AWAITING_NAVIGATOR",
@@ -287,6 +336,7 @@ def supervise(run_dir: Path) -> int:
                         state["model"] = command["model"]
                     if command.get("effort"):
                         state["effort"] = command["effort"]
+                    record_config_evidence(state, backend)
                     state["route_count"] = state.get("route_count", 0) + 1
                     state["last_compaction_id"] = command["compaction_id"]
                     state["continuation"] = str(continuation)
@@ -304,6 +354,7 @@ def supervise(run_dir: Path) -> int:
                     state["execution_count"] = state.get("execution_count", 0) + 1
                     state["last_execute_delta_chars"] = len(command.get("text", ""))
                     _write_state(run_dir, state)
+                    backend.verify_integrity()
                     backend.prompt(phase_prompt(plan, run_dir, "EXECUTE", command.get("text", "")))
                     prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
                                             "builder", "implementation and validation", skip_if_unchanged=True)
@@ -323,9 +374,11 @@ def supervise(run_dir: Path) -> int:
                     state["status"] = "READY_FOR_REVIEW" if passed else "VALIDATION_FAILED"
                     state["phase"] = state["status"]
                     state["review_patch"] = str(run_dir / "builder-review.patch")
+                    collect_usage(run_dir, state, state["execution_count"] + 1)
                     build_review(run_dir)
                     _write_state(run_dir, state)
                 elif kind == "approve":
+                    backend.verify_integrity()
                     apply_review(run_dir)
                     final_status = "approved"
                     break

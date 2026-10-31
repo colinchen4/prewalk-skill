@@ -11,19 +11,37 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import prewalk_hash
 import prewalk_runtime
+from builder_backends.base import child_env
 from builder_backends.process import popen_group_kwargs
+
+BUILDER_ENV_REMOVE = (
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL",
+    "ANTHROPIC_DEFAULT_*", "CLAUDE_CODE_EFFORT_LEVEL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
+    "OPENAI_MODEL", "CODEX_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY", "KIMI_CODE_API_KEY",
+    "KIMI_MODEL", "KIMI_DEFAULT_MODEL", "KIMI_CODE_MODEL", "KIMI_CODE_DEFAULT_MODEL",
+)
 
 
 class PersistentError(RuntimeError):
     pass
 
 
+def binary_integrity(path: str) -> dict[str, Any]:
+    target = Path(path).resolve()
+    if not target.is_file():
+        raise PersistentError(f"Builder executable is missing: {target}")
+    return {"path": str(target), "sha256": prewalk_hash.sha256_file(target),
+            "size": target.stat().st_size}
+
+
 class JsonRpcBackend:
     def __init__(self, argv: list[str], cwd: Path, run_dir: Path,
-                 env: dict[str, str] | None = None):
+                 env: dict[str, str] | None = None, integrity: dict[str, Any] | None = None):
         self.cwd = Path(cwd)
         self.run_dir = Path(run_dir)
+        self.integrity = integrity or {}
         self.events_path = self.run_dir / "builder-events.jsonl"
         self.err_path = self.run_dir / "builder.err"
         self.events_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,11 +125,24 @@ class JsonRpcBackend:
         if not self.session_id:
             raise PersistentError("Builder session has not started")
         if model:
-            self.call("session/set_config_option", {"sessionId": self.session_id,
-                                                    "configId": "model", "value": model})
+            result = self.call("session/set_config_option", {"sessionId": self.session_id,
+                                                             "configId": "model", "value": model})
+            self.config_options = result.get("configOptions") or self.config_options
         if effort:
-            self.call("session/set_config_option", {"sessionId": self.session_id,
-                                                    "configId": "thinking", "value": effort})
+            result = self.call("session/set_config_option", {"sessionId": self.session_id,
+                                                             "configId": "thinking", "value": effort})
+            self.config_options = result.get("configOptions") or self.config_options
+
+    def current_config(self) -> dict[str, Any]:
+        return {option.get("id"): option.get("currentValue")
+                for option in self.config_options if option.get("id")}
+
+    def verify_integrity(self) -> None:
+        if not self.integrity:
+            raise PersistentError("Builder executable integrity is unavailable")
+        current = binary_integrity(self.integrity["path"])
+        if current["sha256"] != self.integrity["sha256"] or current["size"] != self.integrity["size"]:
+            raise PersistentError("Builder executable changed during the run")
 
     def prompt(self, text: str) -> dict[str, Any]:
         if not self.session_id:
@@ -140,11 +171,15 @@ def create_backend(backend_id: str, cwd: Path, run_dir: Path,
                    model: str | None, effort: str | None) -> JsonRpcBackend:
     if backend_id == "mock":
         script = Path(__file__).resolve().with_name("mock_persistent_builder.py")
-        env = dict(os.environ)
-        env["PREWALK_MOCK_TRACE"] = str(run_dir / "mock-session.json")
-        return JsonRpcBackend([sys.executable, str(script)], cwd, run_dir, env)
+        env = child_env(os.environ, BUILDER_ENV_REMOVE,
+                        {"PREWALK_MOCK_TRACE": str(run_dir / "mock-session.json")})
+        return JsonRpcBackend([sys.executable, str(script)], cwd, run_dir, env,
+                              integrity=binary_integrity(str(script)))
     if backend_id == "kimi-sub":
         import shutil
 
-        return JsonRpcBackend([shutil.which("kimi") or "kimi", "acp"], cwd, run_dir, dict(os.environ))
+        executable = shutil.which("kimi") or "kimi"
+        return JsonRpcBackend([executable, "acp"], cwd, run_dir,
+                              child_env(os.environ, BUILDER_ENV_REMOVE),
+                              integrity=binary_integrity(executable))
     raise PersistentError(f"{backend_id}: persistent Builder is not implemented; use the legacy adapter")

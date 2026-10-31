@@ -42,11 +42,13 @@ state.json                # persistent Builder state machine
 progress.jsonl            # bounded machine events, read by seq only
 routes.jsonl              # model/effort route reason and compaction evidence
 usage.json                # per-role/model-call usage and cache evidence
+builder-usage.json        # cumulative Kimi wire usage, when available
+continuation-<id>.json    # compact routing state, never a transcript
 ```
 
 The physical index is shared, but model reading is not duplicated: Navigator consumes only the digest; Builder queries the full index by symbol/hunk after launch. Plan prose can be path-light, but machine-checkable `scope` remains mandatory.
 
-The complete diff is a first-class specification. It removes the need for a verbose plan. Do not replace it with prose and do not resend it on every resume.
+The complete diff is a first-class specification. It removes the need for a verbose plan. Do not replace it with prose and do not resend it on every resume. Plan, index, review patches, and continuations carry content fingerprints; identical content is not rebuilt or rewritten. Volatile timestamps are excluded from fingerprints.
 
 ## 4. Persistent Builder state machine
 
@@ -65,7 +67,7 @@ PLANNED (Navigator only, no Builder)
 
 A one-shot CLI resumed with `--session` preserves history but is not process persistence. Such an adapter must not claim the persistent contract. Unsupported hosts fail explicitly or use the legacy serial path with that limitation stated.
 
-The execute delta contains only the command, plan/L1 references, and any new constraints. The same PID/session and worktree must be used. If execution checks contradict the plan, Builder pauses for Navigator instead of changing scope or plan.
+The execute delta contains only the command, plan/L1 references, and any new constraints. The same PID/session and worktree must be used. If execution checks contradict the plan, Builder pauses for Navigator instead of changing scope or plan. Every prompt shares the same `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY: prewalk/<handoff-id>` prefix; only the trailing phase instructions and deltas change.
 
 ## 5. Pure-Git isolation and checkpoints
 
@@ -84,7 +86,9 @@ Builder returns process metadata, complete diffs, and validation artifacts. A va
 
 Navigator does not read Builder's summary. A return envelope may verify `HANDOFF_ID`, session identity, and phase integrity, but its prose has no authority. No diff or no verification means no approval, regardless of Builder's claims.
 
-`prewalk doctor` may check configured and requested models, but actual model acceptance requires launch/event evidence. Backends without observed-model evidence report `unverified`, never a false `model_ok`.
+`prewalk doctor` may check configured and requested models, but actual model acceptance requires launch/event evidence. Backends without observed-model evidence report `unverified`, never a false `model_ok`. ACP `configOptions.currentValue` is recorded separately from usage-reported models; mismatches become warnings rather than silent fallbacks.
+
+Builder environments remove other providers' credentials, base URLs, and model overrides while preserving the host's OAuth configuration. The executable path, size, and SHA256 are recorded and checked again before execute and approve. This detects changes during the run; it does not claim vendor-signature verification.
 
 ## 7. Cache-efficient routing
 
@@ -105,7 +109,7 @@ Record separately for Navigator and Builder:
 - plan, digest, brief, diff and execute-delta sizes;
 - validation outcomes, rework count, and final review findings.
 
-The primary cost metric is tokens per accepted task, not model unit price. A cheaper route is valid only when correctness and final review quality hold.
+The primary cost metric is tokens per accepted task, not model unit price. A cheaper route is valid only when correctness and final review quality hold. Missing host usage is `unavailable` or `not_collected`, never zero.
 
 ## 9. Required acceptance tests
 
@@ -117,3 +121,5 @@ The primary cost metric is tokens per accepted task, not model unit price. A che
 - Failed layers are preserved until explicit disposal; approved patches are conflict-checked before application.
 - Navigator acceptance requires actual diff and validation evidence, not Builder prose.
 - Route/compaction events preserve the documented session boundary and are observable.
+- Identical plan/index/patch/continuation content is not rewritten; stable prompt prefixes and cache keys hold across phases.
+- Builder environment strips foreign credentials/model overrides without removing OAuth configuration, and executable/model/usage evidence is never invented.

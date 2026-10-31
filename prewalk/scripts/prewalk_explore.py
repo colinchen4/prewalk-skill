@@ -12,6 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
+import prewalk_hash
 import prewalk_layers
 import prewalk_runtime
 
@@ -101,13 +102,14 @@ def build_index(cwd: Path, scopes: list[str], entry_terms: Iterable[str] = (),
             "entries": entries, "truncated": truncated, "nav_digest": digest}
 
 
-def write_index(run_dir: Path, document: dict[str, Any]) -> dict[str, Path]:
+def write_index(run_dir: Path, document: dict[str, Any]) -> dict[str, Any]:
     run_dir.mkdir(parents=True, exist_ok=True)
     index = run_dir / "exploration-index.json"
     digest = run_dir / "nav-digest.json"
-    prewalk_runtime._atomic_write_json(index, document)
-    prewalk_runtime._atomic_write_json(digest, document["nav_digest"])
-    return {"index": index, "digest": digest}
+    index_unchanged, fingerprint = prewalk_hash.write_json_if_changed(index, document, {"generated_at"})
+    digest_unchanged, _ = prewalk_hash.write_json_if_changed(digest, document["nav_digest"])
+    return {"index": index, "digest": digest, "fingerprint": fingerprint,
+            "unchanged": index_unchanged and digest_unchanged}
 
 
 def main(argv: list[str] | None = None) -> int:

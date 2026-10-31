@@ -9,6 +9,7 @@ import unittest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "scripts"))
+import prewalk_builder
 import prewalk_explore
 import prewalk_plan
 
@@ -68,6 +69,16 @@ class PlanTests(unittest.TestCase):
         for mode, expected in (("brief_only", True), ("sample_guided", True), ("navigator_only", False)):
             plan = prewalk_plan.create_plan("h1", mode, "goal", ["verified"], ["src/"])
             self.assertEqual(plan["builder_required"], expected)
+
+    def test_prompt_prefix_is_stable_across_phases(self):
+        plan = prewalk_plan.create_plan("h1", "brief_only", "goal", ["verified"], ["src/"])
+        run = Path("run")
+        exploring = prewalk_builder.phase_prompt(plan, run, "EXPLORING")
+        executing = prewalk_builder.phase_prompt(plan, run, "EXECUTE", "continue")
+        self.assertEqual(exploring.split("CURRENT_PHASE:", 1)[0], executing.split("CURRENT_PHASE:", 1)[0])
+        self.assertIn("SESSION_CACHE_KEY: prewalk/h1", exploring)
+        self.assertIn("CURRENT_PHASE: EXPLORING", exploring)
+        self.assertIn("CURRENT_PHASE: EXECUTE", executing)
 
     def test_write_and_load_plan(self):
         with tempfile.TemporaryDirectory() as tmp:

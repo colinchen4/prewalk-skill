@@ -10,6 +10,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import prewalk_hash
 import prewalk_runtime
 
 MODES = ("brief_only", "sample_guided", "navigator_only")
@@ -57,7 +58,7 @@ def create_plan(handoff_id: str, mode: str, goal: str, success: list[str], scope
 
 def write_plan(run_dir: Path, plan: dict[str, Any]) -> Path:
     path = run_dir / "plan.json"
-    prewalk_runtime._atomic_write_json(path, validate_plan(plan))
+    prewalk_hash.write_json_if_changed(path, validate_plan(plan))
     return path
 
 
