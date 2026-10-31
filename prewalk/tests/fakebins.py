@@ -58,6 +58,34 @@ elif backend == "kimi":
             print("managed:kimi-code  type=kimi  models=6  source=oauth")
         else:
             print("deepseek  type=openai  models=4  source=inline")
+    elif args[:2] == ["session", "list"]:
+        listing = os.environ.get("FAKE_KIMI_SESSION_LIST")
+        if listing:
+            with open(listing, encoding="utf-8") as handle:
+                print(handle.read())
+        else:
+            print("[]")
+elif backend == "ctags":
+    import json as _json
+    import re as _re
+    if "--version" in args:
+        print("Universal Ctags 6.1.0(fake)" if os.environ.get("FAKE_CTAGS", "universal") == "universal"
+              else "Exuberant Ctags 5.8")
+        raise SystemExit(0)
+    files = [a for i, a in enumerate(args)
+             if not a.startswith("-") and (i == 0 or args[i - 1] not in ("-f", "-o"))]
+    tag = _re.compile(r"^\s*(?:export\s+)?(?:async\s+)?"
+                      r"(?:function|class|interface|type|def|fun)\s+([A-Za-z_$][\w$]*)")
+    for name in files:
+        try:
+            lines = open(name, encoding="utf-8").read().splitlines()
+        except OSError:
+            continue
+        hits = [(n, tag.match(line).group(1)) for n, line in enumerate(lines, 1) if tag.match(line)]
+        for i, (n, sym) in enumerate(hits):
+            end = hits[i + 1][0] - 1 if i + 1 < len(hits) else len(lines)
+            print(_json.dumps({"_type": "tag", "name": sym, "path": name,
+                               "line": n, "kind": "function", "end": end}))
 raise SystemExit(0)
 '''
 
