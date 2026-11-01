@@ -99,21 +99,85 @@ def cost(tokens: dict[str, float], price: dict[str, Any]) -> float:
     return total / 1_000_000.0
 
 
-def _builder_usage(run_dir: Path) -> tuple[dict[str, float], str | None]:
+def _section_by_model(section: dict[str, Any]) -> dict[str | None, dict[str, float]]:
+    """Aggregate usage tokens per model. Prefer a per-call list (`calls` with
+    `model` + `usage`); otherwise fall back to `totals` under the first model."""
+    calls = section.get("calls")
+    if isinstance(calls, list):
+        by_model: dict[str | None, dict[str, float]] = {}
+        for call in calls:
+            if not isinstance(call, dict) or not isinstance(call.get("usage"), dict):
+                continue
+            model = call.get("model") if isinstance(call.get("model"), str) else None
+            bucket = by_model.setdefault(model, {})
+            for raw_key in CATEGORY_MAP:
+                value = call["usage"].get(raw_key)
+                if isinstance(value, (int, float)):
+                    bucket[raw_key] = bucket.get(raw_key, 0.0) + value
+        if by_model:
+            return {model: tokens_from_totals(t) for model, t in by_model.items()}
+    models = section.get("models")
+    model = (next((m for m in models if isinstance(m, str) and m), None)
+             if isinstance(models, list) else None)
+    return {model: tokens_from_totals(section.get("totals"))}
+
+
+def _sum_tokens(by_model: dict[str | None, dict[str, float]]) -> dict[str, float]:
+    total = {category: 0.0 for category in CATEGORIES}
+    for tokens in by_model.values():
+        for category in CATEGORIES:
+            total[category] += tokens.get(category, 0.0)
+    return total
+
+
+def _primary_model(by_model: dict[str | None, dict[str, float]]) -> str | None:
+    best = None
+    best_tokens = -1.0
+    for model, tokens in by_model.items():
+        total = sum(tokens.values())
+        if model is not None and total > best_tokens:
+            best, best_tokens = model, total
+    return best
+
+
+def _price_by_model(by_model: dict[str | None, dict[str, float]],
+                    prices: dict[str, Any]) -> tuple[float, list[str]]:
+    """Price each model's tokens at its own price. Returns (usd, unpriced models)."""
+    total = 0.0
+    missing = []
+    for model, tokens in by_model.items():
+        price = resolve_price(prices, model)
+        try:
+            total += cost(tokens, price) if price is not None else 0.0
+        except ValueError:
+            price = None
+        if price is None:
+            missing.append(model or "unknown")
+    return total, missing
+
+
+def _builder_usage(run_dir: Path) -> tuple[dict[str | None, dict[str, float]], str | None]:
     usage_path = run_dir / "builder-usage.json"
     if not usage_path.is_file():
         usage_path = run_dir / "usage.json"
     try:
         data = json.loads(prewalk_runtime._read_text_with_retry(usage_path))
     except (OSError, ValueError):
-        return tokens_from_totals({}), None
+        return {}, None
     builder = data.get("builder", data) if isinstance(data, dict) else {}
     if not isinstance(builder, dict):
         builder = {}
-    models = builder.get("models")
-    model = next((m for m in models if isinstance(m, str) and m), None) \
-        if isinstance(models, list) else None
-    return tokens_from_totals(builder.get("totals")), model
+    by_model = _section_by_model(builder)
+    return by_model, _primary_model(by_model)
+
+
+def _run_json_model(run_dir: Path) -> str | None:
+    try:
+        data = json.loads(prewalk_runtime._read_text_with_retry(run_dir / "run.json"))
+    except (OSError, ValueError):
+        return None
+    model = data.get("navigator_model") if isinstance(data, dict) else None
+    return model if isinstance(model, str) and model else None
 
 
 def _recorded_navigator(run_dir: Path) -> dict[str, Any] | None:
@@ -126,12 +190,14 @@ def _recorded_navigator(run_dir: Path) -> dict[str, Any] | None:
     if not isinstance(section, dict):
         return None
     models = section.get("models")
-    model = next((m for m in models if isinstance(m, str) and m), None)         if isinstance(models, list) else None
-    if isinstance(section.get("totals"), dict):
-        return {"tokens": tokens_from_totals(section["totals"]), "model": model,
-                "status": "recorded"}
+    model = (next((m for m in models if isinstance(m, str) and m), None)
+             if isinstance(models, list) else None)
+    if isinstance(section.get("totals"), dict) or isinstance(section.get("calls"), list):
+        by_model = _section_by_model(section)
+        return {"tokens": _sum_tokens(by_model), "by_model": by_model,
+                "model": _primary_model(by_model) or model, "status": "recorded"}
     if model:
-        return {"tokens": None, "model": model,
+        return {"tokens": None, "by_model": None, "model": model,
                 "status": section.get("usage_status") or "not_collected"}
     return None
 
@@ -191,26 +257,22 @@ def _kimi_navigator_usage(run_dir: Path, state: dict[str, Any], plan: dict[str, 
     _, wire = matches[0]
     segments, _ = prewalk_runtime._read_kimi_wire(wire)
     records = [record for segment in segments for record in segment]
+    skipped_scope = sum(1 for r in records
+                        if r.get("usageScope") not in (None, "turn"))
+    records = [r for r in records if r.get("usageScope") in (None, "turn")]
     if start_ms is not None:
         records = [r for r in records if not isinstance(r.get("time"), (int, float))
                    or r["time"] >= start_ms]
     if end_ms is not None:
         records = [r for r in records if not isinstance(r.get("time"), (int, float))
                    or r["time"] <= end_ms]
-    totals: dict[str, float] = {}
-    model = None
-    for record in records:
-        usage = record.get("usage")
-        if not isinstance(usage, dict):
-            continue
-        if model is None and isinstance(record.get("model"), str):
-            model = record["model"]
-        for raw_key in CATEGORY_MAP:
-            value = usage.get(raw_key)
-            if isinstance(value, (int, float)):
-                totals[raw_key] = totals.get(raw_key, 0.0) + value
-    return {"tokens": tokens_from_totals(totals), "model": model,
-            "status": "auto", "reason": None, "calls": len(records)}
+    calls = [{"model": r.get("model"), "usage": r.get("usage")}
+             for r in records if isinstance(r.get("usage"), dict)]
+    by_model = _section_by_model({"calls": calls})
+    return {"tokens": _sum_tokens(by_model) if by_model else tokens_from_totals({}),
+            "by_model": by_model, "model": _primary_model(by_model),
+            "status": "auto", "reason": None, "calls": len(calls),
+            "skipped_scope": skipped_scope}
 
 
 def _navigator_overhead(run_dir: Path) -> dict[str, Any]:
@@ -244,18 +306,23 @@ def build_report(run_dir: Path, state: dict[str, Any] | None = None,
     window = {"start": plan.get("created_at") or state.get("created_at"),
               "end": state.get("ended_at"), "start_ms": start_ms, "end_ms": end_ms}
 
-    builder_tokens, builder_model = _builder_usage(run_dir)
+    builder_by_model, builder_model = _builder_usage(run_dir)
+    builder_tokens = _sum_tokens(builder_by_model)
     navigator = _recorded_navigator(run_dir)
     if navigator is None and state.get("backend") == "kimi-sub":
         navigator = _kimi_navigator_usage(run_dir, state, plan, start_ms, end_ms)
     if navigator is None:
-        navigator = {"tokens": None, "model": None, "status": "not_collected", "reason": None}
+        navigator = {"tokens": None, "by_model": None, "model": None,
+                     "status": "not_collected", "reason": None}
     if navigator["status"] in ("unavailable", "not_collected") and navigator.get("reason"):
         errors.append(f"navigator usage {navigator['status']}: {navigator['reason']}")
 
-    navigator_model = navigator.get("model") or builder_model
-    if navigator_model and navigator_model == builder_model and not navigator.get("model"):
-        errors.append("navigator model unknown; navigator price resolved as the Builder model")
+    # Navigator model, in priority order: recorded usage section -> auto Kimi
+    # wire records -> run.json navigator_model (legacy runs) -> unknown.
+    navigator_model = navigator.get("model") or _run_json_model(run_dir)
+    if navigator_model is None:
+        errors.append("navigator model unknown; "
+                      "run record-usage --model <navigator model>")
 
     price_file = prices_path()
     prices: dict[str, Any] = {}
@@ -271,13 +338,23 @@ def build_report(run_dir: Path, state: dict[str, Any] | None = None,
 
     builder_price = resolve_price(prices, builder_model)
     navigator_price = resolve_price(prices, navigator_model)
+    builder_cost, unpriced_builder = _price_by_model(builder_by_model, prices)
+    nav_by_model = navigator.get("by_model") or {}
+    navigator_cost, unpriced_nav = (_price_by_model(nav_by_model, prices)
+                                    if nav_by_model else (0.0, []))
+    unpriced_models = unpriced_builder + unpriced_nav
+    for model in unpriced_models:
+        errors.append(f"no price for model {model}")
 
     report: dict[str, Any] = {
         "schema_version": 1, "handoff_id": state.get("handoff_id"),
         "generated_at": _now(), "run_dir": str(run_dir), "window": window,
         "currency": "USD",
         "models": {"navigator": navigator_model, "builder": builder_model},
-        "tokens": {"navigator": navigator.get("tokens"), "builder": builder_tokens},
+        "tokens": {"navigator": navigator.get("tokens"), "builder": builder_tokens,
+                   "by_model": {"builder": builder_by_model,
+                                "navigator": nav_by_model}},
+        "skipped_scope_count": navigator.get("skipped_scope", 0),
         "prices": {"navigator": navigator_price, "builder": builder_price,
                    "path": str(price_file), "mtime": prices_mtime},
         "navigator_usage": navigator["status"],
@@ -289,13 +366,13 @@ def build_report(run_dir: Path, state: dict[str, Any] | None = None,
     }
 
     nav_usable = navigator["status"] in ("recorded", "auto") and navigator.get("tokens") is not None
-    if builder_price is None or navigator_price is None:
+    if navigator_model is None or navigator_price is None or unpriced_models:
         report["mode"] = "unpriced"
         report["cost_status"] = "unpriced"
         return report
     try:
-        builder_cost = cost(builder_tokens, builder_price)
-        builder_at_nav = cost(builder_tokens, navigator_price)
+        builder_at_nav = sum(cost(tokens, navigator_price)
+                             for tokens in builder_by_model.values())
     except ValueError as exc:
         errors.append(str(exc))
         report["mode"] = "unpriced"
@@ -303,13 +380,6 @@ def build_report(run_dir: Path, state: dict[str, Any] | None = None,
         return report
 
     if nav_usable:
-        try:
-            navigator_cost = cost(navigator["tokens"], navigator_price)
-        except ValueError as exc:
-            errors.append(str(exc))
-            report["mode"] = "unpriced"
-            report["cost_status"] = "unpriced"
-            return report
         actual = navigator_cost + builder_cost
         baseline = navigator_cost + builder_at_nav
         saved = baseline - actual
@@ -349,14 +419,35 @@ def write_report(run_dir: Path, report: dict[str, Any]) -> dict[str, Any]:
 
 
 def append_history(report: dict[str, Any], path: Path | None = None) -> None:
+    """Append one entry per (handoff_id, run_dir); re-reporting replaces the
+    existing entry for the same run instead of duplicating it."""
     path = path or history_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    entry = {"handoff_id": report.get("handoff_id"), "date": report.get("generated_at"),
+    run_dir = report.get("run_dir")
+    handoff = report.get("handoff_id")
+    kept = []
+    if path.exists():
+        for line in (prewalk_runtime._read_text_with_retry(path) or "").splitlines():
+            if not line.strip():
+                continue
+            try:
+                old = json.loads(line)
+            except json.JSONDecodeError:
+                old = None
+            same_key = isinstance(old, dict) and old.get("handoff_id") == handoff
+            same_key = same_key and old.get("run_dir") == run_dir
+            if same_key:
+                continue
+            kept.append(line)
+    entry = {"handoff_id": handoff, "run_dir": run_dir,
+             "date": report.get("generated_at"),
              "models": report.get("models") or {}, "mode": report.get("mode"),
              "pct": report.get("savings_pct", report.get("builder_only_savings_pct")),
              "saved": report.get("saved")}
-    with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    kept.append(json.dumps(entry, ensure_ascii=False))
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(chr(10).join(kept) + chr(10), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def run_report(run_dir: Path, state: dict[str, Any] | None = None,

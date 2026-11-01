@@ -131,6 +131,53 @@ class FormulaTests(SavingsFixture):
         self.assertEqual(entry["pct"], EXPECTED["savings_pct"])
 
 
+    def test_builder_calls_priced_per_model(self):
+        # b/m: 3000 input @ $1 -> 0.003 ; b2/m: 2000 input @ $2 -> 0.004
+        # builder_cost = 0.007; actual = 0.0165 + 0.007 = 0.0235
+        # builder @ nav price = 5000*10/1e6 = 0.05; baseline = 0.0665
+        # saved = 0.043; pct = 1 - 0.0235/0.0665 = 0.6466... -> 64.7
+        (self.run / "builder-usage.json").write_text(json.dumps({
+            "calls": [
+                {"model": "b/m", "usage": {"inputOther": 3000}},
+                {"model": "b2/m", "usage": {"inputOther": 2000}},
+            ]}), encoding="utf-8")
+        self.prices.write_text(json.dumps({
+            "nav/m": NAV_PRICE, "b/m": BUILDER_PRICE,
+            "b2/m": {"input": 2, "cache_read": 0, "cache_write": 0, "output": 4}}),
+            encoding="utf-8")
+        report = self.report()
+        self.assertEqual(report["mode"], "full")
+        self.assertAlmostEqual(report["actual"], 0.0235)
+        self.assertAlmostEqual(report["baseline"], 0.0665)
+        self.assertAlmostEqual(report["saved"], 0.043)
+        self.assertEqual(report["savings_pct"], 64.7)
+        self.assertEqual(report["tokens"]["builder"]["input"], 5000)
+        self.assertEqual(report["tokens"]["by_model"]["builder"]["b2/m"]["input"], 2000)
+
+    def test_unpriced_builder_call_model_is_unpriced(self):
+        (self.run / "builder-usage.json").write_text(json.dumps({
+            "calls": [
+                {"model": "b/m", "usage": {"inputOther": 3000}},
+                {"model": "unpriced/m", "usage": {"inputOther": 2000}},
+            ]}), encoding="utf-8")
+        report = self.report()
+        self.assertEqual(report["mode"], "unpriced")
+        self.assertNotIn("savings_pct", report)
+
+    def test_history_dedupes_by_handoff_and_run(self):
+        report = self.report()
+        prewalk_savings.append_history(report)
+        prewalk_savings.append_history(report)
+        path = prewalk_savings.history_path()
+        lines = path.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(lines), 1)
+        entry = json.loads(lines[0])
+        self.assertEqual(entry["run_dir"], str(self.run))
+        other = dict(report, run_dir=str(self.root / "other-run"))
+        prewalk_savings.append_history(other)
+        self.assertEqual(len(path.read_text(encoding="utf-8").splitlines()), 2)
+
+
 class BuilderOnlyTests(SavingsFixture):
     def setUp(self):
         super().setUp()
@@ -147,6 +194,22 @@ class BuilderOnlyTests(SavingsFixture):
         self.assertAlmostEqual(report["builder_at_nav_price"], EXPECTED_ONLY["builder_at_nav"])
         self.assertEqual(report["builder_only_savings_pct"], EXPECTED_ONLY["pct"])
         self.assertNotIn("savings_pct", report)
+
+
+    def test_run_json_navigator_model_is_legacy_source(self):
+        (self.run / "usage.json").unlink()
+        (self.run / "run.json").write_text(
+            json.dumps({"navigator_model": "nav/m"}), encoding="utf-8")
+        report = self.report()
+        self.assertEqual(report["mode"], "builder_only")
+        self.assertEqual(report["models"]["navigator"], "nav/m")
+
+    def test_unknown_navigator_model_is_unpriced(self):
+        (self.run / "usage.json").unlink()
+        report = self.report()
+        self.assertEqual(report["mode"], "unpriced")
+        self.assertNotIn("savings_pct", report)
+        self.assertIn("navigator model unknown", "; ".join(report["errors"]))
 
 
 class KimiDiscoveryTests(SavingsFixture):
@@ -208,7 +271,9 @@ class KimiDiscoveryTests(SavingsFixture):
             report = self.report()
         self.assertEqual(report["navigator_usage"], "unavailable")
         self.assertIn("no Navigator session", report["navigator_usage_reason"])
-        self.assertEqual(report["mode"], "builder_only")
+        # no builder-model fallback: unknown navigator model -> unpriced
+        self.assertEqual(report["mode"], "unpriced")
+        self.assertIn("navigator model unknown", "; ".join(report["errors"]))
 
         # Two sessions referencing the run dir are ambiguous.
         self.write_wire(self.nav_dir, [wire_record(in_window, self.usage())], marker=True)
@@ -231,6 +296,45 @@ class KimiDiscoveryTests(SavingsFixture):
             report = self.report()
         self.assertEqual(report["tokens"]["navigator"], NAV_TOKENS)
         self.assertEqual(report["navigator_calls"], 1)
+
+
+    def test_navigator_wire_records_priced_per_model(self):
+        # nav/m 1700 tokens -> primary; nav2/m adds 500 input @ $20 -> 0.01
+        # nav_cost = 0.0165 + 0.01 = 0.0265; actual = 0.0265 + 0.0067 = 0.0332
+        # baseline = 0.0265 + 0.067 = 0.0935; saved = 0.0603
+        # pct = 1 - 0.0332/0.0935 = 0.6449... -> 64.5
+        in_window = self.start_ms + 60_000
+        self.write_wire(self.nav_dir, [
+            wire_record(in_window, self.usage(), model="nav/m"),
+            wire_record(in_window + 1, {"inputOther": 500, "inputCacheRead": 0,
+                                        "inputCacheCreation": 0, "output": 0},
+                        model="nav2/m"),
+        ], marker=True)
+        self.prices.write_text(json.dumps({
+            "nav/m": NAV_PRICE, "b/m": BUILDER_PRICE,
+            "nav2/m": {"input": 20, "cache_read": 0, "cache_write": 0, "output": 0}}),
+            encoding="utf-8")
+        with mock.patch.dict(os.environ, {"KIMI_BIN": self.kimi,
+                                        "FAKE_KIMI_SESSION_LIST": str(self.session_list())}):
+            report = self.report()
+        self.assertEqual(report["mode"], "full")
+        self.assertAlmostEqual(report["actual"], 0.0332)
+        self.assertAlmostEqual(report["baseline"], 0.0935)
+        self.assertEqual(report["savings_pct"], 64.5)
+        self.assertEqual(report["models"]["navigator"], "nav/m")
+        self.assertEqual(report["tokens"]["by_model"]["navigator"]["nav2/m"]["input"], 500)
+
+    def test_non_turn_scope_records_are_skipped(self):
+        in_window = self.start_ms + 60_000
+        offscope = wire_record(in_window + 1, self.usage(9999))
+        offscope["usageScope"] = "subagent"
+        self.write_wire(self.nav_dir,
+                        [wire_record(in_window, self.usage()), offscope], marker=True)
+        with mock.patch.dict(os.environ, {"KIMI_BIN": self.kimi,
+                                        "FAKE_KIMI_SESSION_LIST": str(self.session_list())}):
+            report = self.report()
+        self.assertEqual(report["tokens"]["navigator"], NAV_TOKENS)
+        self.assertEqual(report["skipped_scope_count"], 1)
 
 
 if __name__ == "__main__":
