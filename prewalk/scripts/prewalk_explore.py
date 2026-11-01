@@ -90,16 +90,24 @@ def _py_definitions(text: str) -> list[dict[str, Any]] | None:
     return found
 
 
-def _ctags_definitions(exe: str, target: Path) -> list[dict[str, Any]] | None:
+CTAGS_BATCH = 100
+
+
+def _ctags_definitions(exe: str, cwd: Path,
+                       paths: list[str]) -> dict[str, list[dict[str, Any]]] | None:
+    """One ctags invocation for a batch of files; results mapped back by the
+    tag's `path` field (normalized to forward-slash relative paths)."""
     try:
         proc = subprocess.run(
-            [exe, "--output-format=json", "--fields=+nKe", "--sort=no", "-f", "-", str(target)],
-            capture_output=True, text=True, timeout=60, check=False)
+            [exe, "--output-format=json", "--fields=+nKe", "--sort=no", "-f", "-",
+             *[str(Path(p)) for p in paths]],
+            capture_output=True, text=True, timeout=120, cwd=cwd, check=False)
     except (OSError, subprocess.SubprocessError):
         return None
     if proc.returncode != 0:
         return None
-    found = []
+    lookup = {Path(rel).as_posix(): rel for rel in paths}
+    found: dict[str, list[dict[str, Any]]] = {rel: [] for rel in paths}
     for line in proc.stdout.splitlines():
         line = line.strip()
         if not line:
@@ -110,10 +118,15 @@ def _ctags_definitions(exe: str, target: Path) -> list[dict[str, Any]] | None:
             continue
         if tag.get("_type") != "tag" or not tag.get("name") or not tag.get("line"):
             continue
+        rel = lookup.get(Path(str(tag.get("path", ""))).as_posix())
+        if rel is None:
+            rel = lookup.get(Path(str(tag.get("path", ""))).as_posix().removeprefix("./"))
+        if rel is None:
+            continue
         entry = {"symbol": str(tag["name"]), "line": int(tag["line"])}
         if isinstance(tag.get("end"), int):
             entry["end_line"] = tag["end"]
-        found.append(entry)
+        found[rel].append(entry)
     return found
 
 
@@ -131,16 +144,10 @@ def _regex_definitions(suffix: str, lines: list[str]) -> list[dict[str, Any]]:
     return found
 
 
-def _file_definitions(cwd: Path, path: str, lines: list[str],
-                      ctags: str | None) -> list[dict[str, Any]]:
+def _file_definitions(path: str, lines: list[str]) -> list[dict[str, Any]]:
     suffix = Path(path).suffix.lower()
     if suffix == ".py":
         parsed = _py_definitions("\n".join(lines))
-        if parsed is not None:
-            return parsed
-        return _regex_definitions(suffix, lines)
-    if ctags:
-        parsed = _ctags_definitions(ctags, cwd / path)
         if parsed is not None:
             return parsed
     return _regex_definitions(suffix, lines)
@@ -216,16 +223,34 @@ def build_index(cwd: Path, scopes: list[str], entry_terms: Iterable[str] = (),
     lines_by_file: dict[str, list[str]] = {}
     definitions: list[dict[str, Any]] = []
     truncated = len(files) > max_files
+    non_py: list[tuple[str, list[str]]] = []
     for path in files[:max_files]:
         try:
             lines = (cwd / path).read_text(encoding="utf-8", errors="replace").splitlines()
         except OSError:
             continue
         lines_by_file[path] = lines
-        for found in _file_definitions(cwd, path, lines, ctags):
-            definitions.append({"path": path, "line": found["line"], "symbol": found["symbol"],
-                                "relation": "definition", "end_line": found.get("end_line"),
-                                "note": f"{Path(path).suffix} symbol definition"})
+        if Path(path).suffix.lower() == ".py" or not ctags:
+            for found in _file_definitions(path, lines):
+                definitions.append({"path": path, "line": found["line"],
+                                    "symbol": found["symbol"], "relation": "definition",
+                                    "end_line": found.get("end_line"),
+                                    "note": f"{Path(path).suffix} symbol definition"})
+        else:
+            non_py.append((path, lines))
+    if ctags and non_py:
+        for start in range(0, len(non_py), CTAGS_BATCH):
+            batch = non_py[start:start + CTAGS_BATCH]
+            parsed = _ctags_definitions(ctags, cwd, [path for path, _ in batch])
+            for path, lines in batch:
+                found_defs = parsed.get(path) if parsed is not None else None
+                if found_defs is None:
+                    found_defs = _regex_definitions(Path(path).suffix.lower(), lines)
+                for found in found_defs:
+                    definitions.append({"path": path, "line": found["line"],
+                                        "symbol": found["symbol"], "relation": "definition",
+                                        "end_line": found.get("end_line"),
+                                        "note": f"{Path(path).suffix} symbol definition"})
 
     def_lines = {(e["path"], e["line"]) for e in definitions}
     references: list[dict[str, Any]] = []
@@ -243,9 +268,18 @@ def build_index(cwd: Path, scopes: list[str], entry_terms: Iterable[str] = (),
 
     entries = sorted(definitions, key=lambda e: (e["path"], e["line"])) + \
         sorted(references, key=lambda e: (e["path"], e["line"]))
+    # Rank candidates over the full, untruncated entry list.
+    candidates = _rank_candidates(entries, terms)
     if len(entries) > max_entries:
         truncated = True
-    kept = entries[:max_entries]
+    # Truncation keeps all references first, then fills with definitions,
+    # preferring definitions in files that contain references.
+    ref_files = {e["path"] for e in references}
+    kept = sorted(references, key=lambda e: (e["path"], e["line"]))[:max_entries]
+    kept += sorted(
+        definitions,
+        key=lambda e: (e["path"] not in ref_files,
+                        e["path"], e["line"]))[:max(0, max_entries - len(kept))]
     tests = [path for path in files if is_test_path(path)]
     risks = []
     if len(files) > 20:
@@ -254,7 +288,6 @@ def build_index(cwd: Path, scopes: list[str], entry_terms: Iterable[str] = (),
         risks.append("no_test_coverage")
     if truncated:
         risks.append("index_truncated")
-    candidates = _rank_candidates(kept, terms)
     digest = {"schema_version": 1, "files": len(files),
               "definitions": sum(e["relation"] == "definition" for e in kept),
               "references": sum(e["relation"] == "reference" for e in kept),
@@ -289,7 +322,7 @@ def query_index(run_dir: Path, symbol: str | None = None, path: str | None = Non
     if relation:
         entries = [e for e in entries if e.get("relation") == relation]
     if path:
-        entries = [e for e in entries if path in str(e.get("path", ""))]
+        entries = [e for e in entries if str(e.get("path", "")).startswith(path)]
     if symbol:
         exact = [e for e in entries if e.get("symbol") == symbol]
         substring = [e for e in entries

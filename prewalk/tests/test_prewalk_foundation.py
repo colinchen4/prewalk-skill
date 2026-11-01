@@ -142,6 +142,48 @@ class ExploreTests(unittest.TestCase):
         self.assertTrue(all(e["relation"] == "reference" for e in by_rel["entries"]))
 
 
+    def test_query_path_is_prefix_not_substring(self):
+        document = prewalk_explore.build_index(self.repo, ["."], ["Alpha"])
+        prewalk_explore.write_index(self.repo / "run", document)
+        prefix = prewalk_explore.query_index(self.repo / "run", path="src")
+        self.assertTrue(prefix["entries"])
+        self.assertTrue(all(e["path"].startswith("src") for e in prefix["entries"]))
+        substring = prewalk_explore.query_index(self.repo / "run", path="c/b.py")
+        self.assertEqual(substring["entries"], [])
+
+    def test_truncation_keeps_references_and_ranks_full_list(self):
+        for i in range(6):
+            (self.repo / "src" / f"m{i}.py").write_text(
+                f"def filler{i}():\n    pass\n", encoding="utf-8")
+        document = prewalk_explore.build_index(self.repo, ["src/"], ["Alpha"], max_entries=3)
+        self.assertTrue(document["truncated"])
+        refs = [e for e in document["entries"] if e["relation"] == "reference"]
+        self.assertTrue(refs)
+        self.assertLessEqual(len(document["entries"]), 3)
+        top = document["nav_digest"]["candidate_l1"]
+        self.assertIsNotNone(top)
+        self.assertEqual(top["symbol"], "Alpha")
+
+    def test_ctags_batch_indexes_multiple_files(self):
+        (self.repo / "src" / "one.js").write_text("function uno() { return 1 }\n",
+                                                  encoding="utf-8")
+        (self.repo / "src" / "two.js").write_text("class Dos { }\n", encoding="utf-8")
+        bin_dir = fakebins.make_bin_dir(Path(self.tmp.name) / "fake2", names=("ctags",))
+        real = prewalk_explore.shutil.which
+
+        def which(name):
+            if name == "ctags":
+                return str(bin_dir / ("ctags.cmd" if os.name == "nt" else "ctags"))
+            return real(name)
+
+        with mock.patch("prewalk_explore.shutil.which", side_effect=which):
+            document = prewalk_explore.build_index(self.repo, ["src/"], ["uno"])
+        self.assertEqual(document["nav_digest"]["engine"]["definitions"], "ast+ctags")
+        syms = {e["symbol"] for e in document["entries"] if e["relation"] == "definition"}
+        self.assertIn("uno", syms)
+        self.assertIn("Dos", syms)
+
+
 class PlanTests(unittest.TestCase):
     def test_modes_define_builder_requirement(self):
         for mode, expected in (("brief_only", True), ("sample_guided", True), ("navigator_only", False)):
