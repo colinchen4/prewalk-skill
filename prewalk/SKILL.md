@@ -50,7 +50,7 @@ Persist a confirmed pairing with `prewalk_prefs.py save ...` (models and efforts
 ## Builder executor contract
 
 - Dispatch only through the adapter's documented launch and resume paths; do not hand-maintain provider configuration, credentials, or runtime copies.
-- Keep one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, and permission boundary. See [session-continuity.md](references/session-continuity.md).
+- Keep one resumable Builder session for one task, repository/worktree, branch, model/effort pairing, and permission boundary. The protocol design is in [builder-fusion.md](references/builder-fusion.md) and legacy session rules in [session-continuity.md](references/session-continuity.md); read them only when changing the protocol or using a legacy adapter.
 - Give the executor a self-contained handoff; it receives no parent context. If the Builder model cannot accept images, encode all necessary visual facts in the handoff.
 - Delegate by judgment density: Navigator keeps decisions; Builder takes mechanical implementation even when technically hard. Builder never performs the final review.
 
@@ -76,7 +76,7 @@ Create a TODO list with 3-8 items, exactly one in progress, validation on every 
 
 ### Classify and write the plan before starting Builder
 
-Do not start any Builder process for exploration. Classify after Navigator has enough deterministic evidence: `brief_only` (mechanical, verifiable; no Navigator edit), `sample_guided` (one Navigator L1 sample), or `navigator_only` (judgment dominates; finish directly). Read [builder-fusion.md](references/builder-fusion.md) and write `plan.json` with `prewalk_plan.py create`; pass `--explore` only when Builder should run a scoped exploration turn first.
+Do not start any Builder process for exploration. Classify after Navigator has enough deterministic evidence: `brief_only` (mechanical, verifiable; no Navigator edit), `sample_guided` (one Navigator L1 sample), or `navigator_only` (judgment dominates; finish directly). Write `plan.json` with `prewalk_plan.py create`; pass `--explore` only when Builder should run a scoped exploration turn first.
 
 ### Dispatch at the Builder boundary (persistent protocol)
 
