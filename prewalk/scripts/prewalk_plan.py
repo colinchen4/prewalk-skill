@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import re
 import sys
@@ -43,22 +44,29 @@ def validate_plan(raw: Any) -> dict[str, Any]:
     validation = raw.get("validation", [])
     if not isinstance(validation, list) or not all(isinstance(v, str) and v.strip() for v in validation):
         raise ValueError("validation must be a list of command strings")
-    return {**raw, "builder_required": raw["mode"] != "navigator_only"}
+    if not isinstance(raw.get("explore", False), bool):
+        raise ValueError("explore must be a boolean")
+    return {**raw, "explore": raw.get("explore", False),
+            "builder_required": raw["mode"] != "navigator_only"}
 
 
 def create_plan(handoff_id: str, mode: str, goal: str, success: list[str], scope: list[str],
                 context: str = "", cwd: str | None = None,
                 validation: list[str] | None = None,
-                model: str | None = None, effort: str | None = None) -> dict[str, Any]:
+                model: str | None = None, effort: str | None = None,
+                explore: bool = False) -> dict[str, Any]:
     return validate_plan({"schema_version": 1, "status": "planned", "handoff_id": handoff_id,
                           "mode": mode, "goal": goal, "success": success,
                           "scope": scope, "context": context, "cwd": cwd or str(Path.cwd()),
-                          "validation": validation or [], "model": model, "effort": effort})
+                          "validation": validation or [], "model": model, "effort": effort,
+                          "explore": explore})
 
 
 def write_plan(run_dir: Path, plan: dict[str, Any]) -> Path:
     path = run_dir / "plan.json"
-    prewalk_hash.write_json_if_changed(path, validate_plan(plan))
+    clean = validate_plan(plan)
+    clean.setdefault("created_at", _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="milliseconds"))
+    prewalk_hash.write_json_if_changed(path, clean, {"created_at"})
     return path
 
 
@@ -85,6 +93,7 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--validation", action="append", default=[])
     create.add_argument("--model")
     create.add_argument("--effort")
+    create.add_argument("--explore", action="store_true")
     validate = sub.add_parser("validate")
     validate.add_argument("--plan", required=True, type=Path)
     args = parser.parse_args(argv)
@@ -92,7 +101,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             plan = create_plan(args.handoff_id, args.mode, args.goal, args.success, args.scope,
                                context=args.context, cwd=args.cwd, validation=args.validation,
-                               model=args.model, effort=args.effort)
+                               model=args.model, effort=args.effort, explore=args.explore)
             path = write_plan(args.run_dir, plan)
             result = {"ok": True, "plan": str(path), "builder_required": plan["builder_required"]}
         else:

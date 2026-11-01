@@ -19,6 +19,7 @@ import prewalk_hash
 import prewalk_layers
 import prewalk_plan
 import prewalk_runtime
+import prewalk_savings
 
 TERMINAL = {"approved", "discarded", "failed", "cancelled", "merge_conflict"}
 WAITING = {"AWAITING_NAVIGATOR", "READY_FOR_REVIEW", "VALIDATION_FAILED"}
@@ -49,31 +50,61 @@ def _event(run_dir: Path, event: dict[str, Any]) -> None:
     prewalk_async.append_event(run_dir / "progress.jsonl", event)
 
 
-def phase_prompt(plan: dict[str, Any], run_dir: Path, phase: str, delta: str = "") -> str:
-    lines = ["PREWALK_PHASE: PERSISTENT_BUILDER", f"HANDOFF_ID: {plan['handoff_id']}",
-             f"SESSION_CACHE_KEY: prewalk/{plan['handoff_id']}", "",
-             f"GOAL: {plan['goal']}", "SUCCESS:", *[f"- {item}" for item in plan["success"]],
-             "FILE SCOPE:", *[f"- {item}" for item in plan["scope"]]]
-    if plan.get("context"):
-        lines += ["CONTEXT:", plan["context"]]
-    index = run_dir / "exploration-index.json"
-    if index.exists():
-        lines.append(f"EXECUTION INDEX: {index}; query only what you need")
-    if (run_dir / "first-edit.patch").exists():
-        lines.append(f"FIRST_EDIT_PATCH: {run_dir / 'first-edit.patch'}; read the complete patch")
+def phase_prompt(plan: dict[str, Any], run_dir: Path, phase: str, delta: str = "",
+                 include_plan: bool = True) -> str:
+    lines = ["PREWALK_PHASE: PERSISTENT_BUILDER", f"HANDOFF_ID: {plan['handoff_id']}", ""]
+    if include_plan:
+        lines += [f"GOAL: {plan['goal']}", "SUCCESS:",
+                  *[f"- {item}" for item in plan["success"]],
+                  "FILE SCOPE:", *[f"- {item}" for item in plan["scope"]]]
+        if plan.get("context"):
+            lines += ["CONTEXT:", plan["context"]]
+        if (run_dir / "exploration-index.json").exists():
+            explore = Path(__file__).with_name("prewalk_explore.py")
+            lines.append(f"EXECUTION INDEX: look symbols up with "
+                         f"`{sys.executable} {explore} query --run-dir {run_dir} "
+                         "--symbol <name>`; do not open exploration-index.json")
+        if (run_dir / "first-edit.patch").exists():
+            lines.append(f"FIRST_EDIT_PATCH: {run_dir / 'first-edit.patch'}; read the complete patch")
     lines.append(f"CURRENT_PHASE: {phase}")
     if phase == "EXPLORING":
         lines += ["Do not edit any file. Check only definitions, references, and tests inside scope.",
                   "Return EXPLORATION_READY and any concrete contradiction, then wait for EXECUTE.",
                   "Do not return NAVIGATOR_REVIEW and do not end this session."]
-    else:
+    elif include_plan:
         lines += ["Implement the approved plan now. Read the complete L1 patch when present.",
                   "Do not change the plan or scope. The supervisor independently runs validation.",
                   "Return only after implementation and relevant checks. Prose alone is not evidence."]
+    else:
+        lines.append("Apply the delta below in the same session; the plan and scope are unchanged.")
+    if phase != "EXPLORING":
+        lines += ["End with a NOTE: section of at most 5 lines flagging anything the Navigator "
+                  "should know, plus one CONTRADICTION: line per concrete plan contradiction."]
     if delta:
         lines += ["NEW DELTA:", delta]
     return "\n".join(lines) + "\n"
 
+
+def parse_reply(text: str) -> tuple[str | None, list[str]]:
+    note_lines: list[str] = []
+    contradictions: list[str] = []
+    in_note = False
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("CONTRADICTION:"):
+            contradictions.append(stripped.removeprefix("CONTRADICTION:").strip()[:300])
+            in_note = False
+            continue
+        if stripped.startswith("NOTE:"):
+            in_note = True
+            note_lines.append(stripped.removeprefix("NOTE:").strip())
+            continue
+        if in_note and stripped and len(note_lines) < 5:
+            note_lines.append(stripped)
+        elif in_note:
+            in_note = False
+    note = "\n".join(note_lines)[:800] if note_lines else None
+    return note, contradictions
 
 def launch(run_dir: Path, plan_path: Path, backend_id: str) -> dict[str, Any]:
     run_dir = run_dir.resolve()
@@ -117,7 +148,9 @@ def launch(run_dir: Path, plan_path: Path, backend_id: str) -> dict[str, Any]:
                  "source_worktree": str(source), "builder_worktree": str(builder_wt),
                  "base_layer": base_layer, "base_sha": base_sha, "plan": str(plan_path),
                  "cache_key": f"prewalk/{plan['handoff_id']}",
-                 "created_at": _now(), "cold_starts": 1}
+                 "created_at": _now(), "cold_starts": 1,
+                 "execution_count": 0, "handled_command_seq": 0, "turn_count": 0,
+                 "prompt_chars_total": 0}
         _write_state(run_dir, state)
         proc = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "_supervise",
                                  "--run-dir", str(run_dir)],
@@ -199,6 +232,10 @@ def record_config_evidence(state: dict[str, Any], backend: persistent_backends.J
 
 
 def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
+    spy = os.environ.get("PREWALK_USAGE_TURN_LOG")
+    if spy:
+        with open(spy, "a", encoding="utf-8") as handle:
+            handle.write(str(turn) + chr(10))
     if state["backend"] != "kimi-sub":
         state["usage_status"] = "unavailable"
         return
@@ -211,8 +248,18 @@ def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
     except (prewalk_runtime.InspectError, OSError, ValueError) as exc:
         usage = {"usage_status": "unavailable", "usage_error": str(exc), "models": []}
     prewalk_runtime._atomic_write_json(direct_path, usage)
-    prewalk_runtime._atomic_write_json(run_dir / "usage.json", {
-        "builder": usage, "navigator": {"usage_status": "not_collected"}})
+    usage_file = run_dir / "usage.json"
+    existing: dict[str, Any] = {}
+    if usage_file.exists():
+        try:
+            existing = json.loads(prewalk_runtime._read_text_with_retry(usage_file))
+        except (OSError, ValueError):
+            existing = {}
+    navigator = existing.get("navigator")
+    if not isinstance(navigator, dict):
+        navigator = {"usage_status": "not_collected"}
+    prewalk_runtime._atomic_write_json(usage_file,
+                                       {"builder": usage, "navigator": navigator})
     state["usage_status"] = usage["usage_status"]
     state["cache_usage"] = usage.get("totals")
     state["observed_models"] = usage.get("models") or []
@@ -257,7 +304,7 @@ def write_continuation(run_dir: Path, command: dict[str, Any]) -> Path:
 def queue(run_dir: Path, command: str, text: str = "", model: str | None = None,
           effort: str | None = None, reason: str = "", compaction_id: str = "") -> dict[str, Any]:
     state = _read_state(run_dir)
-    if command == "execute" and state["status"] not in WAITING:
+    if command == "execute" and state["status"] not in WAITING | {"starting", "EXPLORING"}:
         raise ValueError(f"cannot execute while Builder is {state['status']}")
     if command == "approve" and state["status"] != "READY_FOR_REVIEW":
         raise ValueError("Builder is not READY_FOR_REVIEW")
@@ -288,11 +335,36 @@ def queue(run_dir: Path, command: str, text: str = "", model: str | None = None,
     return {"ok": True, "command_seq": event["seq"], "status": state["status"]}
 
 
+def _send_prompt(backend: persistent_backends.JsonRpcBackend, run_dir: Path,
+                 state: dict[str, Any], plan: dict[str, Any], phase: str,
+                 delta: str = "", cancel_check: Any = None) -> str:
+    include_plan = not state.get("plan_sent")
+    text = phase_prompt(plan, run_dir, phase, delta, include_plan=include_plan)
+    state["last_prompt_chars"] = len(text)
+    state["prompt_chars_total"] = state.get("prompt_chars_total", 0) + len(text)
+    reply = backend.prompt(text, cancel_check=cancel_check)
+    state["plan_sent"] = True
+    state["turn_count"] = state.get("turn_count", 0) + 1
+    turn = state["turn_count"]
+    reply_text = reply.get("text") or ""
+    (run_dir / f"turn-{turn:03d}-reply.md").write_text(reply_text, encoding="utf-8")
+    note, contradictions = parse_reply(reply_text)
+    if phase == "EXPLORING" and contradictions:
+        state["exploration_contradictions"] = contradictions
+    if phase != "EXPLORING":
+        if note:
+            state["builder_note"] = note
+        else:
+            state.pop("builder_note", None)
+    return reply_text
+
+
 def supervise(run_dir: Path) -> int:
     state = _read_state(run_dir)
     plan = prewalk_plan.load_plan(Path(state["plan"]))
     backend = None
     final_status = "failed"
+    seen = 0
     try:
         backend = persistent_backends.create_backend(state["backend"], run_dir / "worktree", run_dir,
                                                       state.get("model"), state.get("effort"))
@@ -300,24 +372,25 @@ def supervise(run_dir: Path) -> int:
         record_config_evidence(state, backend)
         state["cli_integrity"] = backend.integrity
         state["integrity_status"] = "verified"
-        state.update(status="EXPLORING", phase="EXPLORING", supervisor_pid=os.getpid(),
-                     builder_pid=backend.pid, session_id=session, started_at=_now())
-        _write_state(run_dir, state)
-        _event(run_dir, {"state": "EXPLORING", "builder_pid": backend.pid, "session_id": session})
-        explore_prompt = phase_prompt(plan, run_dir, "EXPLORING")
-        state["explore_brief_chars"] = len(explore_prompt)
+        initial_phase = "EXPLORING" if plan.get("explore") else "AWAITING_NAVIGATOR"
+        state.update(status=initial_phase, phase=initial_phase,
+                     supervisor_pid=os.getpid(), builder_pid=backend.pid,
+                     session_id=session, started_at=_now())
         state["usage_status"] = "unavailable"
+        _write_state(run_dir, state)
+        _event(run_dir, {"state": initial_phase, "builder_pid": backend.pid,
+                         "session_id": session})
         prewalk_async.append_event(run_dir / "routes.jsonl",
                                    {"action": "launch", "to_model": state.get("model"),
                                     "to_effort": state.get("effort"), "reason": "planned backend"})
-        backend.prompt(explore_prompt)
-        collect_usage(run_dir, state, 1)
-        prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
-                                "builder", "scoped exploration", skip_if_unchanged=True)
-        state.update(status="AWAITING_NAVIGATOR", phase="AWAITING_NAVIGATOR",
-                     exploration_ready_at=_now())
-        _write_state(run_dir, state)
-        seen = len(prewalk_async.read_tail(_commands_path(run_dir)))
+        if plan.get("explore"):
+            _send_prompt(backend, run_dir, state, plan, "EXPLORING")
+            collect_usage(run_dir, state, state["turn_count"])
+            prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
+                                    "builder", "scoped exploration", skip_if_unchanged=True)
+            state.update(status="AWAITING_NAVIGATOR", phase="AWAITING_NAVIGATOR",
+                         exploration_ready_at=_now())
+            _write_state(run_dir, state)
         while True:
             if backend.proc.poll() is not None:
                 raise persistent_backends.PersistentError("Builder process exited before review disposal")
@@ -348,14 +421,30 @@ def supervise(run_dir: Path) -> int:
                                                 "reason": command.get("reason") or "Navigator route",
                                                 "compaction_id": command["compaction_id"],
                                                 "same_session": True, "same_pid": True})
-                    _write_state(run_dir, state)
                 elif kind == "execute":
                     state.update(status="EXECUTING", phase="EXECUTING")
                     state["execution_count"] = state.get("execution_count", 0) + 1
                     state["last_execute_delta_chars"] = len(command.get("text", ""))
                     _write_state(run_dir, state)
                     backend.verify_integrity()
-                    backend.prompt(phase_prompt(plan, run_dir, "EXECUTE", command.get("text", "")))
+
+                    def _cancel_pending(after=command["seq"]) -> bool:
+                        return any(item["type"] == "cancel"
+                                   for item in prewalk_async.read_tail(_commands_path(run_dir), after))
+
+                    try:
+                        _send_prompt(backend, run_dir, state, plan, "EXECUTE",
+                                     command.get("text", ""), cancel_check=_cancel_pending)
+                    except persistent_backends.CancelledError:
+                        cancel_seq = command["seq"]
+                        for item in prewalk_async.read_tail(_commands_path(run_dir), command["seq"]):
+                            if item["type"] == "cancel":
+                                cancel_seq = item["seq"]
+                        state["handled_command_seq"] = max(
+                            state.get("handled_command_seq", 0), cancel_seq)
+                        seen = max(seen, state["handled_command_seq"])
+                        final_status = "cancelled"
+                        break
                     prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
                                             "builder", "implementation and validation", skip_if_unchanged=True)
                     records = run_validation(run_dir, plan)
@@ -374,19 +463,20 @@ def supervise(run_dir: Path) -> int:
                     state["status"] = "READY_FOR_REVIEW" if passed else "VALIDATION_FAILED"
                     state["phase"] = state["status"]
                     state["review_patch"] = str(run_dir / "builder-review.patch")
-                    collect_usage(run_dir, state, state["execution_count"] + 1)
+                    collect_usage(run_dir, state, state["turn_count"])
                     build_review(run_dir)
-                    _write_state(run_dir, state)
                 elif kind == "approve":
                     backend.verify_integrity()
                     apply_review(run_dir)
                     final_status = "approved"
-                    break
                 elif kind == "discard":
                     final_status = "discarded"
-                    break
                 elif kind == "cancel":
                     final_status = "cancelled"
+                state["handled_command_seq"] = max(
+                    state.get("handled_command_seq", 0), command["seq"])
+                _write_state(run_dir, state)
+                if final_status != "failed":
                     break
             if final_status != "failed":
                 break
@@ -407,9 +497,26 @@ def supervise(run_dir: Path) -> int:
                                       str(run_dir / "worktree")], capture_output=True, check=False)
             if cleanup.returncode:
                 state["cleanup_error"] = cleanup.stderr.decode("utf-8", "replace")
+        if final_status == "cancelled" and (run_dir / "worktree").exists():
+            try:
+                prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
+                                        "supervisor", "cancel final snapshot", skip_if_unchanged=True)
+                build_review(run_dir)
+            except Exception:
+                pass
+        state["handled_command_seq"] = max(state.get("handled_command_seq", 0), seen)
         state["status"] = final_status
         state["phase"] = final_status
         state["ended_at"] = _now()
+        try:
+            report = prewalk_savings.run_report(run_dir, state, plan)
+            summary = prewalk_savings.summary_block(report)
+            if summary:
+                state["savings"] = summary
+        except Exception as exc:
+            prewalk_runtime._atomic_write_json(run_dir / "savings.json",
+                                               {"schema_version": 1, "mode": "error",
+                                                "error": str(exc), "generated_at": _now()})
         _write_state(run_dir, state)
         prewalk_async._release_active(run_dir)
         _event(run_dir, {"state": final_status, "error": state.get("error")})
@@ -421,19 +528,118 @@ def status(run_dir: Path) -> dict[str, Any]:
     return {"ok": True, **state, "terminal": state["status"] in TERMINAL}
 
 
+def _max_queued_seq(run_dir: Path) -> int:
+    commands = prewalk_async.read_tail(_commands_path(run_dir))
+    return commands[-1]["seq"] if commands else 0
+
+
+def is_idle(run_dir: Path) -> bool:
+    state = _read_state(run_dir)
+    if state["status"] not in WAITING | TERMINAL:
+        return False
+    return state.get("handled_command_seq", 0) >= _max_queued_seq(run_dir)
+
+
+def summary(run_dir: Path) -> dict[str, Any]:
+    state = _read_state(run_dir)
+    validations = []
+    for path in sorted((run_dir / "validation").glob("*.json")):
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        validations.append({"command": record.get("command"),
+                            "exit_code": record.get("exit_code")})
+    review = {}
+    review_path = run_dir / "builder-review.json"
+    if review_path.exists():
+        try:
+            review = json.loads(review_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            review = {}
+    changed = review.get("changed") or []
+    out = {"ok": True, "status": state["status"], "idle": is_idle(run_dir),
+           "terminal": state["status"] in TERMINAL,
+           "execution_count": state.get("execution_count", 0),
+           "handled_command_seq": state.get("handled_command_seq", 0),
+           "validation": validations,
+           "has_diff": review.get("has_diff"),
+           "changed_files": len(changed),
+           "changed_paths": [e.get("path") for e in changed][:10],
+           "patch": review.get("patch"),
+           "model_status": state.get("model_status")}
+    for key in ("model_warning", "route_recommendation", "error",
+                "exploration_contradictions"):
+        if state.get(key) is not None:
+            out[key] = state[key]
+    if state["status"] in {"VALIDATION_FAILED", "failed"} and state.get("builder_note"):
+        out["builder_note"] = state["builder_note"]
+    savings = state.get("savings")
+    if savings is None:
+        savings_path = run_dir / "savings.json"
+        if savings_path.exists():
+            try:
+                savings = prewalk_savings.summary_block(
+                    json.loads(savings_path.read_text(encoding="utf-8")))
+            except (OSError, ValueError):
+                savings = None
+    if savings is not None:
+        out["savings"] = savings
+    return out
+
+
 def wait(run_dir: Path, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while True:
-        result = status(run_dir)
-        if result["terminal"] or time.monotonic() >= deadline:
+        result = summary(run_dir)
+        if result["idle"] or time.monotonic() >= deadline:
             return result
         time.sleep(0.2)
+
+
+def record_usage(run_dir: Path, role: str, input_tokens: int | None = None,
+                 output_tokens: int | None = None,
+                 cache_read: int | None = None, cache_creation: int | None = None,
+                 model: str | None = None) -> dict[str, Any]:
+    if all(v is None for v in (input_tokens, output_tokens, cache_read, cache_creation, model)):
+        raise ValueError("record-usage requires --input/--output tokens or --model")
+    usage_path = run_dir / "usage.json"
+    data: dict[str, Any] = {}
+    if usage_path.exists():
+        try:
+            data = json.loads(prewalk_runtime._read_text_with_retry(usage_path))
+        except (OSError, ValueError):
+            data = {}
+    section = data.get(role)
+    if not isinstance(section, dict):
+        section = {}
+    totals = section.get("totals")
+    if not isinstance(totals, dict):
+        totals = {}
+    for key, value in (("inputOther", input_tokens), ("output", output_tokens),
+                       ("inputCacheRead", cache_read), ("inputCacheCreation", cache_creation)):
+        if value is not None:
+            totals[key] = totals.get(key, 0) + value
+    models = section.get("models")
+    if not isinstance(models, list):
+        models = []
+    if model and model not in models:
+        models.append(model)
+    gave_tokens = any(v is not None
+                      for v in (input_tokens, output_tokens, cache_read, cache_creation))
+    section.update(usage_status="recorded", totals=totals, models=models)
+    if gave_tokens:
+        section["call_count"] = section.get("call_count", 0) + 1
+    data[role] = section
+    prewalk_runtime._atomic_write_json(usage_path, data)
+    return {"ok": True, role: section}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("launch", "execute", "route", "status", "wait", "review", "approve", "discard", "cancel", "_supervise"):
+    for name in ("launch", "execute", "route", "status", "wait", "review", "approve",
+                 "discard", "cancel", "record-usage", "report", "_supervise"):
         p = sub.add_parser(name)
         p.add_argument("--run-dir", required=True, type=Path)
         if name == "launch":
@@ -446,36 +652,68 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--effort")
             p.add_argument("--reason", default="")
             p.add_argument("--compaction-id", required=True)
+        if name in {"execute", "approve", "discard", "cancel"}:
+            p.add_argument("--wait", action="store_true")
+            p.add_argument("--timeout", type=float, default=3000)
+        if name == "status":
+            p.add_argument("--full", action="store_true")
         if name == "wait":
-            p.add_argument("--timeout", type=float, default=3600)
+            p.add_argument("--timeout", type=float, default=3000)
+        if name == "record-usage":
+            p.add_argument("--role", default="navigator")
+            p.add_argument("--input", type=int)
+            p.add_argument("--output", type=int)
+            p.add_argument("--cache-read", type=int)
+            p.add_argument("--cache-creation", type=int)
+            p.add_argument("--model")
     args = parser.parse_args(argv)
+    output = ""
     try:
         if args.command == "launch":
             result = launch(args.run_dir, args.plan, args.backend)
-        elif args.command == "execute":
-            result = queue(args.run_dir, "execute", args.text)
+        elif args.command in {"execute", "approve", "discard", "cancel"}:
+            result = queue(args.run_dir, args.command,
+                           getattr(args, "text", "") or "")
+            if result.get("ok") and args.wait:
+                result = wait(args.run_dir, args.timeout)
         elif args.command == "route":
             result = queue(args.run_dir, "route", model=args.model, effort=args.effort,
                            reason=args.reason, compaction_id=args.compaction_id)
         elif args.command == "status":
-            result = status(args.run_dir)
+            result = status(args.run_dir) if args.full else summary(args.run_dir)
         elif args.command == "wait":
             result = wait(args.run_dir, args.timeout)
         elif args.command == "review":
             result = build_review(args.run_dir)
-        elif args.command == "approve":
-            result = queue(args.run_dir, "approve")
-        elif args.command == "discard":
-            result = queue(args.run_dir, "discard")
-        elif args.command == "cancel":
-            result = queue(args.run_dir, "cancel")
+        elif args.command == "record-usage":
+            result = record_usage(args.run_dir, args.role, args.input, args.output,
+                                  cache_read=args.cache_read,
+                                  cache_creation=args.cache_creation, model=args.model)
+        elif args.command == "report":
+            result = prewalk_savings.summary_block(
+                prewalk_savings.run_report(args.run_dir)) or {"ok": True}
         else:
             return supervise(args.run_dir)
+        output = json.dumps(result, ensure_ascii=False)
     except (ValueError, OSError, persistent_backends.PersistentError, prewalk_layers.LayerError) as exc:
-        print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False), file=sys.stderr)
+        output = json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False)
+        _record_navigator_call(args, output)
+        print(output, file=sys.stderr)
         return 2
-    print(json.dumps(result, ensure_ascii=False))
+    _record_navigator_call(args, output)
+    print(output)
     return 0
+
+
+def _record_navigator_call(args: Any, output: str) -> None:
+    if args.command == "_supervise":
+        return
+    try:
+        prewalk_async.append_event(Path(args.run_dir) / "navigator-calls.jsonl",
+                                   {"command": args.command, "stdout_chars": len(output),
+                                    "at": _now()})
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":

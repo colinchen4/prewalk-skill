@@ -12,9 +12,9 @@
 No Builder process or model call is allowed before classification and planning are complete.
 
 1. Start with `git status/diff`, targeted ripgrep, existing tests, and at most a few relevant hunks.
-2. If needed, generate one deterministic `exploration-index.json`. It contains paths, lines, symbols, relations, and one-sentence notes, not a code dump.
+2. If needed, generate one deterministic `exploration-index.json` with `prewalk_explore.py --cwd <repo> --run-dir <run> --scope <dirs> --entry <symbol>`. It contains paths, lines, symbols, relations, and one-sentence notes, not a code dump.
 3. Navigator reads only a small `nav-digest.json`: file/symbol counts, dependency and risk flags, candidate L1, test entry points, and uncertainty. It never reads the full index merely to classify.
-4. If the digest is insufficient, Navigator performs targeted reads. Do not start Builder to solve Navigator's classification problem.
+4. If the digest is insufficient, Navigator performs targeted reads — or runs `prewalk_explore.py query --run-dir <run> --symbol <name> [--path <prefix>] [--relation definition|reference]` against the saved index. Do not start Builder to solve Navigator's classification problem.
 
 Choose exactly one mode:
 
@@ -37,12 +37,16 @@ first-edit.patch          # complete L0..L1 patch when L1 exists
 layers.json               # L0, optional L1, L2-n and errors
 turn-NNN-events.jsonl     # native/host evidence, not Navigator reading material
 turn-NNN.err
+turn-NNN-reply.md         # captured Builder reply text per turn (exploration reply is turn 1)
 validation/               # commands, exit codes, stdout/stderr, timestamps
 state.json                # persistent Builder state machine
+commands.jsonl            # queued execute/route/approve/discard/cancel commands
+navigator-calls.jsonl     # Navigator-side CLI invocations, for orchestration cost
 progress.jsonl            # bounded machine events, read by seq only
 routes.jsonl              # model/effort route reason and compaction evidence
 usage.json                # per-role/model-call usage and cache evidence
 builder-usage.json        # cumulative Kimi wire usage, when available
+savings.json, savings.md  # per-run cost savings estimate vs all-Navigator baseline
 continuation-<id>.json    # compact routing state, never a transcript
 ```
 
@@ -54,20 +58,22 @@ The complete diff is a first-class specification. It removes the need for a verb
 
 ```text
 PLANNED (Navigator only, no Builder)
-  -> EXPLORING (Builder starts, scoped checks only)
-  -> EXPLORATION_READY (phase artifact, nonterminal)
-  -> AWAITING_NAVIGATOR (same PID/session waits for a command)
-  -> EXECUTING (short execute delta with plan/L1 references)
+  -> AWAITING_NAVIGATOR (same PID/session waits for a command; explore off)
+  or -> EXPLORING -> AWAITING_NAVIGATOR (plan.explore on)
+  -> EXECUTING (execute delta; first prompt carries the full plan)
   -> VALIDATING
   -> READY_FOR_REVIEW (terminal Builder phase, evidence complete)
   -> Navigator accepts, requests a correction, takes over, or discards
+  -> cancelled, on an explicit cancel command
 ```
 
-`EXPLORATION_READY` is not `NAVIGATOR_REVIEW`; no final response, session teardown, or cold start is allowed. `AWAITING_NAVIGATOR` requires an interactive channel (ACP/stdio or a versioned command queue), not just a prompt telling Builder to wait.
+Exploration is opt-in via `plan.explore` (`prewalk_plan.py create --explore`): the Builder reply is stored in `turn-001-reply.md` and any `CONTRADICTION:` lines are extracted into `state.exploration_contradictions` (300 characters each). `AWAITING_NAVIGATOR` requires an interactive channel (ACP/stdio or a versioned command queue), not just a prompt telling Builder to wait.
+
+A run is **idle** when its status is waiting (`AWAITING_NAVIGATOR`, `READY_FOR_REVIEW`, `VALIDATION_FAILED`) or terminal and `handled_command_seq` covers every queued command; `status`/`wait` report `idle` accordingly, and `--wait` on `execute`, `approve`, `discard`, and `cancel` returns the compact summary when the run becomes idle.
 
 A one-shot CLI resumed with `--session` preserves history but is not process persistence. Such an adapter must not claim the persistent contract. Unsupported hosts fail explicitly or use the legacy serial path with that limitation stated.
 
-The execute delta contains only the command, plan/L1 references, and any new constraints. The same PID/session and worktree must be used. If execution checks contradict the plan, Builder pauses for Navigator instead of changing scope or plan. Every prompt shares the same `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY: prewalk/<handoff-id>` prefix; only the trailing phase instructions and deltas change.
+Prompts open with only `PREWALK_PHASE: <phase>` and `HANDOFF_ID: <id>` header lines. The first `EXECUTE` prompt embeds the full plan; follow-up prompts carry the delta and phase instructions only and never repeat the `GOAL:` block. Each reply is captured to `turn-NNN-reply.md`; a `NOTE:` ending is surfaced to Navigator only on `VALIDATION_FAILED`/`failed` as `builder_note`. If execution checks contradict the plan, Builder pauses for Navigator instead of changing scope or plan.
 
 ## 5. Pure-Git isolation and checkpoints
 
@@ -109,17 +115,21 @@ Record separately for Navigator and Builder:
 - plan, digest, brief, diff and execute-delta sizes;
 - validation outcomes, rework count, and final review findings.
 
+On every terminal status the supervisor runs `prewalk_savings.py`: it writes `savings.json`/`savings.md`, appends to `~/.prewalk/savings-history.jsonl`, and stores a `savings` block in `state.json`. The estimate is `actual = navigator tokens @ navigator price + builder tokens @ builder price` against `baseline = navigator tokens @ navigator price + builder tokens @ navigator price` (`savings_pct = 1 - actual/baseline`), priced per model from a user-maintained `prices.json`; a Builder-only figure uses `1 - builder_cost / (builder tokens @ navigator price)` and is labelled an upper bound. Missing prices or an unknown Navigator model produce token counts and `unpriced`, and a report failure is recorded in `savings.json` without changing the run status.
+
 The primary cost metric is tokens per accepted task, not model unit price. A cheaper route is valid only when correctness and final review quality hold. Missing host usage is `unavailable` or `not_collected`, never zero.
 
 ## 9. Required acceptance tests
 
 - No Builder process exists before plan completion.
 - `brief_only` works without L1; `sample_guided` includes the complete L1 patch.
-- Exploration does not terminate Builder; execute reuses the same PID/session with no repeated exploration payload.
+- With `explore` off, no exploration prompt is sent; with `explore` on, the reply is captured and the run still reuses the same PID/session.
+- The full plan appears only in the first `EXECUTE` prompt; follow-ups are delta-only.
 - Navigator and Builder never edit concurrently; the original HEAD/index/worktree stay untouched until approval.
 - Full L1/L2 diffs survive normal completion, crash, and batched snapshots.
 - Failed layers are preserved until explicit disposal; approved patches are conflict-checked before application.
 - Navigator acceptance requires actual diff and validation evidence, not Builder prose.
 - Route/compaction events preserve the documented session boundary and are observable.
-- Identical plan/index/patch/continuation content is not rewritten; stable prompt prefixes and cache keys hold across phases.
+- Identical plan/index/patch/continuation content is not rewritten; the `PREWALK_PHASE`/`HANDOFF_ID` header is stable across phases.
 - Builder environment strips foreign credentials/model overrides without removing OAuth configuration, and executable/model/usage evidence is never invented.
+- A savings report is attempted on every terminal status; its failure never changes the run status.

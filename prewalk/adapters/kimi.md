@@ -14,7 +14,11 @@ The optional separate `kimi-deepseek-subagent` skill owns the managed executor c
 
 A configured surface is not proof that a requested model or effort works; keep the core model/effort preflight and use the manager's acceptance evidence for the actual pairing.
 
-## Initial dispatch
+## Persistent Builder (`kimi-sub`)
+
+The verified path is the persistent ACP backend `kimi-sub`: `prewalk_builder.py` manages the session (`launch`, `execute --wait`, `status [--full]`, `review`, `route`, `approve --wait`, `discard`, `cancel --wait`) and Navigator session usage for the savings report is discovered automatically from the Kimi session whose `wire.jsonl` references the run dir. The `kimi -p` commands below describe the legacy one-shot adapter for non-persistent runs; see [../references/legacy-oneshot.md](../references/legacy-oneshot.md).
+
+## Initial dispatch (legacy one-shot)
 
 Launch from the task workspace and pass the handoff package by absolute file path. Keeping the package out of the command line avoids Windows command-line length limits and quoting corruption; the executor's Read tool loads the full package itself.
 

@@ -27,7 +27,7 @@ flowchart TD
     end
 
     F --> G["Launch one persistent Builder"]
-    G --> H["Scoped exploration; no edits"]
+    G --> H["Optional scoped exploration; no edits"]
     H --> I["AWAITING_NAVIGATOR"]
     I --> J["Execute in isolated Git worktree"]
     J --> K["Independent validation and full diff"]
@@ -46,12 +46,14 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     [*] --> PLANNED
-    PLANNED --> EXPLORING: launch after completed plan
-    EXPLORING --> AWAITING_NAVIGATOR: EXPLORATION_READY
+    PLANNED --> AWAITING_NAVIGATOR: launch (explore off)
+    PLANNED --> EXPLORING: launch (plan.explore)
+    EXPLORING --> AWAITING_NAVIGATOR: exploration reply captured
     AWAITING_NAVIGATOR --> EXECUTING: execute delta
     AWAITING_NAVIGATOR --> AWAITING_NAVIGATOR: route at compaction
     EXECUTING --> VALIDATING
     EXECUTING --> FAILED: process error
+    EXECUTING --> CANCELLED: cancel
     VALIDATING --> READY_FOR_REVIEW: all checks pass
     VALIDATING --> VALIDATION_FAILED: command failed
     VALIDATION_FAILED --> EXECUTING: correction delta
@@ -59,9 +61,10 @@ stateDiagram-v2
     READY_FOR_REVIEW --> [*]: approve or discard
     VALIDATION_FAILED --> [*]: discard or take over
     FAILED --> [*]: preserve or discard
+    CANCELLED --> [*]
 ```
 
-`EXPLORATION_READY` is a phase artifact, not a final response. The Builder process remains alive while Navigator works. A one-shot CLI resumed with `--session` preserves history but is not process persistence; such backends are marked `legacy` and must not claim the persistent contract.
+Builder exploration is opt-in (`prewalk_plan.py create --explore`); without it the run reaches `AWAITING_NAVIGATOR` immediately and the first `execute` prompt carries the full plan. A one-shot CLI resumed with `--session` preserves history but is not process persistence; such backends are marked `legacy` and must not claim the persistent contract.
 
 ## Install
 
@@ -107,7 +110,12 @@ python3 prewalk/scripts/prewalk_explore.py \
   --entry RelevantSymbol
 ```
 
-This writes `exploration-index.json` and a small `nav-digest.json`. Navigator reads the digest for classification; Builder queries the full index only as needed. No code snippets are embedded in the index.
+This writes `exploration-index.json` and a small `nav-digest.json`. Navigator reads the digest for classification; the full index is queried later as needed, without returning code snippets:
+
+```sh
+python3 prewalk/scripts/prewalk_explore.py query \
+  --run-dir /tmp/prewalk-run --symbol RelevantSymbol
+```
 
 ### 2. Create the plan
 
@@ -126,6 +134,8 @@ python3 prewalk/scripts/prewalk_plan.py create \
   --model kimi-code/kimi-for-coding \
   --effort low
 ```
+
+Add `--explore` only if the Builder should run a scoped exploration turn before executing; its reply is stored in `turn-001-reply.md` and `CONTRADICTION:` lines are recorded in state.
 
 Modes:
 
@@ -159,13 +169,15 @@ python3 prewalk/scripts/prewalk_builder.py launch \
 python3 prewalk/scripts/prewalk_builder.py status --run-dir /tmp/prewalk-run
 ```
 
-Wait until status is `AWAITING_NAVIGATOR`, then send a short execute delta:
+Wait until status is `AWAITING_NAVIGATOR`, then send a short execute delta. `--wait` blocks until the run is idle again and prints the compact summary:
 
 ```sh
 python3 prewalk/scripts/prewalk_builder.py execute \
   --run-dir /tmp/prewalk-run \
-  --text "Implement the approved plan within the declared scope"
+  --text "Implement the approved plan within the declared scope" --wait
 ```
+
+`--wait` (default 3000 s, adjustable with `--timeout`) is also available on `approve`, `discard`, and `cancel`; if it returns `"idle": false`, re-run it or inspect with `status` (`--full` for the complete state). The compact summary reports `idle`, `terminal`, `execution_count`, `handled_command_seq`, `has_diff`, `changed_files` (count), `changed_paths` (first 10), validation records, and the `savings` block.
 
 The supervisor creates a separate worktree based on L1 when present, otherwise L0. The original HEAD, index, and worktree remain untouched.
 
@@ -184,10 +196,13 @@ Inspect:
 Approve or explicitly discard:
 
 ```sh
-python3 prewalk/scripts/prewalk_builder.py approve --run-dir /tmp/prewalk-run
+python3 prewalk/scripts/prewalk_builder.py approve --run-dir /tmp/prewalk-run --wait
 
 # Or, after a deliberate decision:
-python3 prewalk/scripts/prewalk_builder.py discard --run-dir /tmp/prewalk-run
+python3 prewalk/scripts/prewalk_builder.py discard --run-dir /tmp/prewalk-run --wait
+
+# Stop a stuck run while preserving the worktree:
+python3 prewalk/scripts/prewalk_builder.py cancel --run-dir /tmp/prewalk-run --wait
 ```
 
 Approval checks the patch for conflicts before applying it to the original worktree. Failure does not silently merge or delete the failed layer.
@@ -218,11 +233,12 @@ Routing keeps the same ACP session and PID and writes `continuation-compact-1.js
 
 ### Persistent execution and cache efficiency
 
-- One long-lived ACP process/session from scoped exploration through validation.
+- One long-lived ACP process/session from launch through validation.
 - Live `AWAITING_NAVIGATOR`, not a new process or one-shot resume.
-- Stable `PREWALK_PHASE: PERSISTENT_BUILDER` and `SESSION_CACHE_KEY` prefix; only trailing phase instructions and deltas vary.
+- Every prompt opens with only `PREWALK_PHASE: <phase>` and `HANDOFF_ID: <id>` header lines. The first `EXECUTE` prompt embeds the full plan; follow-up prompts are delta-only and never repeat `GOAL:`.
+- Activity-based idle timeout (`PREWALK_BUILDER_IDLE_TIMEOUT`, default 1800 s) resets on every streamed update; `session/cancel` plus `PREWALK_CANCEL_GRACE` (default 15 s) ends a run as `cancelled` with the worktree preserved.
 - Content hashes for plan, index, review patches, and continuations; identical content is not rebuilt or rewritten, and volatile timestamps are excluded.
-- Append-only execute deltas and command history; no repeated full plan, exploration payload, or diff on resume.
+- Append-only execute deltas and command history (`commands.jsonl`); no repeated full plan on resume. Replies are captured per turn in `turn-NNN-reply.md`, and `NOTE:`/`CONTRADICTION:` endings are parsed into state.
 - `execution_count`, `cold_starts`, `route_count`, prompt/delta sizes, and rework/failure signatures are recorded.
 - No synthetic keepalive prompts and no forced compaction. Provider cache TTL still applies.
 
@@ -272,6 +288,37 @@ Additional rules:
 - `usage.json` separates Builder usage from Navigator `not_collected`; missing usage is `unavailable` or `not_collected`, never zero.
 - Cost is assessed per accepted task, including rework and final review quality, not just model unit price.
 
+### Per-run savings estimate
+
+On every terminal status (`approved`, `discarded`, `failed`, `cancelled`, `merge_conflict`) the supervisor runs `prewalk_savings.py`, which writes `savings.json`/`savings.md`, stores a `savings` block in `state.json`, and appends one history line per run to `~/.prewalk/savings-history.jsonl`. A report failure is recorded in `savings.json` and never changes the run status.
+
+The estimate compares what the run cost against what the Navigator would have cost doing all the work:
+
+- `actual` = Navigator tokens @ Navigator price + Builder tokens @ Builder price
+- `baseline` = Navigator tokens @ Navigator price + Builder tokens @ Navigator price
+- `savings_pct` = `1 - actual / baseline`
+
+Builder and Navigator tokens are aggregated **per model** (a mid-run routed model is priced at its own price); the baseline prices all Builder tokens at the Navigator price. When Navigator usage is unavailable, a Builder-only figure `1 - builder_cost / (builder tokens @ navigator price)` is reported as an **upper bound**.
+
+Prices come from a user-maintained `~/.prewalk/prices.json` (or `$PREWALK_PRICES_PATH`), in USD per 1M tokens, with optional aliases:
+
+```json
+{
+  "kimi-code/k3.1-pro": {"input": 10, "cache_read": 1, "cache_write": 2, "output": 30},
+  "cheap/model": {"input": 1, "cache_read": 0.1, "cache_write": 0.2, "output": 3},
+  "aliases": {"alias/name": "cheap/model"}
+}
+```
+
+`prewalk_savings.py prices-template` prints a skeleton; `history` lists recorded runs. Navigator model resolution order: recorded `usage.json` models → Kimi wire records → `run.json` `navigator_model` (legacy) → `unpriced` with a "navigator model unknown" error. On Kimi, Navigator usage is discovered automatically from the session whose `wire.jsonl` references the run dir (zero or multiple matches → `unavailable`), filtered to the `[plan.created_at, ended_at]` window and `usageScope` of `turn`/absent. On other Navigator hosts, record usage before approving:
+
+```sh
+python3 prewalk/scripts/prewalk_builder.py record-usage \
+  --run-dir /tmp/prewalk-run --input 12000 --output 800 --model nav/model
+```
+
+The figure is an estimate, not measured savings: it assumes the Navigator would have used the same token counts and says so in every report.
+
 ### Environment, integrity, and secrets
 
 - Builder environments strip foreign API keys, auth tokens, base URLs, and model overrides while preserving Desktop OAuth configuration such as `KIMI_CODE_HOME`.
@@ -307,10 +354,13 @@ Legacy compatibility does not make one-shot session resume equivalent to a live 
 | `state.json` | Phase, PID/session, worktree, model/integrity evidence, counts, and errors |
 | `commands.jsonl` | Append-only execute/route/approve/discard commands |
 | `builder-events.jsonl`, `builder.err` | Native ACP events and stderr |
+| `turn-NNN-reply.md` | Captured Builder reply text per turn |
 | `builder-review.patch`, `builder-review.json` | Actual base..final diff, content hash, changed paths, and validation summary |
 | `validation/` | Independent command records, stdout, and stderr |
-| `usage.json` | Builder usage plus Navigator `not_collected` |
+| `navigator-calls.jsonl` | Navigator-side CLI invocations for orchestration cost |
+| `usage.json` | Builder usage plus Navigator `not_collected` or recorded totals/models |
 | `builder-usage.json` | Cumulative Kimi wire usage when available |
+| `savings.json`, `savings.md` | Per-run savings estimate; `savings-history.jsonl` lives under `~/.prewalk/` |
 | `routes.jsonl` | Launch and compaction-routing evidence |
 | `continuation-<id>.json` | Compact routing state, never a transcript |
 | `progress.jsonl` | Bounded machine events read by sequence |
@@ -326,7 +376,7 @@ python3 -m unittest discover -s prewalk/tests
 
 Current evidence:
 
-- **176 tests pass**, with one POSIX-only process-group test skipped on Windows.
+- **222 tests pass**, with one POSIX-only process-group test skipped on Windows.
 - Real Kimi ACP verification used exactly two prompts on one PID/session: complete L1 preservation, exact Builder output, only `hello.txt` changed, independent validation passed, approval applied, and HEAD/index unchanged.
 - Additional checks cover unchanged-content writes, stable prefixes, environment sanitization, executable changes, model mismatches, failed validation, crashes, batched snapshots, and merge conflicts.
 
@@ -351,6 +401,7 @@ prewalk/
   references/
     builder-fusion.md              # Full persistent protocol
     backends.md                    # Backend registry and validation status
+    legacy-oneshot.md              # Non-persistent adapter setup, Phase B, and review
     async-mode.md                  # Legacy detached supervisor
     handoff-format.md              # Legacy handoff format
     progress-format.md             # Machine progress records
@@ -365,6 +416,7 @@ prewalk/
     prewalk_async.py               # Legacy detached supervisor
     prewalk_runtime.py             # Legacy session/final-message/usage inspection
     prewalk_prefs.py               # Model/effort preferences
+    prewalk_savings.py             # Per-run savings estimate, prices, history
     prewalk_config.py              # Non-secret saved configuration
     persistent_backends/           # ACP JSON-RPC and persistent mock
     builder_backends/              # Backend registry and legacy adapters
@@ -376,6 +428,7 @@ codex-deepseek-subagent/          # Optional host-specific Codex manager
 
 - [Persistent Builder design](prewalk/references/builder-fusion.md)
 - [Backend registry and validation status](prewalk/references/backends.md)
+- [Legacy one-shot protocol](prewalk/references/legacy-oneshot.md)
 - [Legacy async mode](prewalk/references/async-mode.md)
 - [Session continuity](prewalk/references/session-continuity.md)
 - [Adapter contract and generic shim](prewalk/adapters/README.md)
