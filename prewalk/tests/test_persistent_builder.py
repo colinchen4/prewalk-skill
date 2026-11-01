@@ -420,5 +420,100 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual(state["status"], "approved")
 
 
+    def usage_turns(self) -> list[int]:
+        log = self.root / "usage-turns.log"
+        os.environ["PREWALK_USAGE_TURN_LOG"] = str(log)
+        return log
+
+    def read_turns(self, log: Path) -> list[int]:
+        if not log.exists():
+            return []
+        return [int(line) for line in log.read_text().split() if line.strip()]
+
+    def test_collect_usage_uses_current_turn_number(self):
+        log = self.usage_turns()
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        self.assertEqual(self.read_turns(log), [1])
+        prewalk_builder.queue(self.run, "execute", "second pass")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            current = prewalk_builder.status(self.run)
+            if current.get("execution_count", 0) >= 2                     and current["status"] in prewalk_builder.WAITING:
+                break
+            time.sleep(0.05)
+        self.assertEqual(self.read_turns(log), [1, 2])
+
+    def test_collect_usage_turns_with_explore(self):
+        log = self.usage_turns()
+        self.make_explore_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        prewalk_builder.queue(self.run, "execute", "go")
+        self.wait_status("READY_FOR_REVIEW")
+        self.assertEqual(self.read_turns(log), [1, 2])
+
+    def test_explore_is_not_idle_while_exploring(self):
+        os.environ["PREWALK_MOCK_SLOW"] = "3"
+        self.make_explore_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        deadline = time.monotonic() + 10
+        status = ""
+        while time.monotonic() < deadline:
+            status = prewalk_builder.status(self.run)["status"]
+            if status == "EXPLORING":
+                break
+            time.sleep(0.05)
+        self.assertEqual(status, "EXPLORING")
+        result = prewalk_builder.wait(self.run, 0.5)
+        self.assertFalse(result["idle"])
+        self.assertEqual(result["status"], "EXPLORING")
+        self.wait_status("AWAITING_NAVIGATOR", timeout=15)
+        self.execute_and_wait_ready()
+
+    def test_builder_note_cleared_when_reply_has_no_note(self):
+        class StubBackend:
+            def __init__(self, text):
+                self.text = text
+            def prompt(self, text, cancel_check=None):
+                return {"result": {"stopReason": "end_turn"}, "text": self.text}
+
+        self.make_plan()
+        state = {"turn_count": 0, "plan_sent": False, "builder_note": "stale"}
+        plan = prewalk_plan.load_plan(self.run / "plan.json")
+        reply = prewalk_builder._send_prompt(StubBackend("done" + chr(10) + "NOTE: first note"),
+                                             self.run, state, plan, "EXECUTE")
+        self.assertEqual(state["builder_note"], "first note")
+        prewalk_builder._send_prompt(StubBackend("plain reply, no note"),
+                                     self.run, state, plan, "EXECUTE")
+        self.assertNotIn("builder_note", state)
+
+    def test_record_usage_model_only(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.wait_status("AWAITING_NAVIGATOR")
+        prewalk_builder.record_usage(self.run, "navigator", model="nav/m")
+        nav = json.loads((self.run / "usage.json").read_text())["navigator"]
+        self.assertEqual(nav["models"], ["nav/m"])
+        self.assertEqual(nav["totals"], {})
+        self.assertEqual(nav.get("call_count", 0), 0)
+        with self.assertRaises(ValueError):
+            prewalk_builder.record_usage(self.run, "navigator")
+
+    def test_approve_wait_returns_summary_with_savings(self):
+        self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        result = self.cli("execute", "--run-dir", str(self.run), "--text", "go",
+                          "--wait", "--timeout", "60")
+        self.assertEqual(result["changed_files"], 1)
+        self.assertEqual(result["changed_paths"], ["hello.txt"])
+        result = self.cli("approve", "--run-dir", str(self.run), "--wait", "--timeout", "60")
+        self.assertEqual(result["status"], "approved")
+        self.assertTrue(result["idle"])
+        self.assertIn("savings", result)
+        self.assertEqual(result["savings"]["mode"], "unpriced")
+
+
 if __name__ == "__main__":
     unittest.main()

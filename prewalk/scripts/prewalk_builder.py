@@ -232,6 +232,10 @@ def record_config_evidence(state: dict[str, Any], backend: persistent_backends.J
 
 
 def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
+    spy = os.environ.get("PREWALK_USAGE_TURN_LOG")
+    if spy:
+        with open(spy, "a", encoding="utf-8") as handle:
+            handle.write(str(turn) + chr(10))
     if state["backend"] != "kimi-sub":
         state["usage_status"] = "unavailable"
         return
@@ -347,8 +351,11 @@ def _send_prompt(backend: persistent_backends.JsonRpcBackend, run_dir: Path,
     note, contradictions = parse_reply(reply_text)
     if phase == "EXPLORING" and contradictions:
         state["exploration_contradictions"] = contradictions
-    if phase != "EXPLORING" and note:
-        state["builder_note"] = note
+    if phase != "EXPLORING":
+        if note:
+            state["builder_note"] = note
+        else:
+            state.pop("builder_note", None)
     return reply_text
 
 
@@ -365,19 +372,18 @@ def supervise(run_dir: Path) -> int:
         record_config_evidence(state, backend)
         state["cli_integrity"] = backend.integrity
         state["integrity_status"] = "verified"
-        state.update(status="AWAITING_NAVIGATOR", phase="AWAITING_NAVIGATOR",
+        initial_phase = "EXPLORING" if plan.get("explore") else "AWAITING_NAVIGATOR"
+        state.update(status=initial_phase, phase=initial_phase,
                      supervisor_pid=os.getpid(), builder_pid=backend.pid,
                      session_id=session, started_at=_now())
         state["usage_status"] = "unavailable"
         _write_state(run_dir, state)
-        _event(run_dir, {"state": "AWAITING_NAVIGATOR", "builder_pid": backend.pid,
+        _event(run_dir, {"state": initial_phase, "builder_pid": backend.pid,
                          "session_id": session})
         prewalk_async.append_event(run_dir / "routes.jsonl",
                                    {"action": "launch", "to_model": state.get("model"),
                                     "to_effort": state.get("effort"), "reason": "planned backend"})
         if plan.get("explore"):
-            state.update(status="EXPLORING", phase="EXPLORING")
-            _write_state(run_dir, state)
             _send_prompt(backend, run_dir, state, plan, "EXPLORING")
             collect_usage(run_dir, state, state["turn_count"])
             prewalk_layers.snapshot(run_dir / "worktree", run_dir, state["handoff_id"], None,
@@ -457,7 +463,7 @@ def supervise(run_dir: Path) -> int:
                     state["status"] = "READY_FOR_REVIEW" if passed else "VALIDATION_FAILED"
                     state["phase"] = state["status"]
                     state["review_patch"] = str(run_dir / "builder-review.patch")
-                    collect_usage(run_dir, state, state["turn_count"] + 1)
+                    collect_usage(run_dir, state, state["turn_count"])
                     build_review(run_dir)
                 elif kind == "approve":
                     backend.verify_integrity()
@@ -502,19 +508,18 @@ def supervise(run_dir: Path) -> int:
         state["status"] = final_status
         state["phase"] = final_status
         state["ended_at"] = _now()
-        _write_state(run_dir, state)
-        prewalk_async._release_active(run_dir)
-        _event(run_dir, {"state": final_status, "error": state.get("error")})
         try:
             report = prewalk_savings.run_report(run_dir, state, plan)
             summary = prewalk_savings.summary_block(report)
             if summary:
                 state["savings"] = summary
-                _write_state(run_dir, state)
         except Exception as exc:
             prewalk_runtime._atomic_write_json(run_dir / "savings.json",
                                                {"schema_version": 1, "mode": "error",
                                                 "error": str(exc), "generated_at": _now()})
+        _write_state(run_dir, state)
+        prewalk_async._release_active(run_dir)
+        _event(run_dir, {"state": final_status, "error": state.get("error")})
     return 0
 
 
@@ -559,7 +564,8 @@ def summary(run_dir: Path) -> dict[str, Any]:
            "handled_command_seq": state.get("handled_command_seq", 0),
            "validation": validations,
            "has_diff": review.get("has_diff"),
-           "changed_files": [e.get("path") for e in changed] if changed else [],
+           "changed_files": len(changed),
+           "changed_paths": [e.get("path") for e in changed][:10],
            "patch": review.get("patch"),
            "model_status": state.get("model_status")}
     for key in ("model_warning", "route_recommendation", "error",
@@ -591,9 +597,12 @@ def wait(run_dir: Path, timeout: float) -> dict[str, Any]:
         time.sleep(0.2)
 
 
-def record_usage(run_dir: Path, role: str, input_tokens: int, output_tokens: int,
+def record_usage(run_dir: Path, role: str, input_tokens: int | None = None,
+                 output_tokens: int | None = None,
                  cache_read: int | None = None, cache_creation: int | None = None,
                  model: str | None = None) -> dict[str, Any]:
+    if all(v is None for v in (input_tokens, output_tokens, cache_read, cache_creation, model)):
+        raise ValueError("record-usage requires --input/--output tokens or --model")
     usage_path = run_dir / "usage.json"
     data: dict[str, Any] = {}
     if usage_path.exists():
@@ -616,8 +625,11 @@ def record_usage(run_dir: Path, role: str, input_tokens: int, output_tokens: int
         models = []
     if model and model not in models:
         models.append(model)
-    section.update(usage_status="recorded", totals=totals, models=models,
-                   call_count=section.get("call_count", 0) + 1)
+    gave_tokens = any(v is not None
+                      for v in (input_tokens, output_tokens, cache_read, cache_creation))
+    section.update(usage_status="recorded", totals=totals, models=models)
+    if gave_tokens:
+        section["call_count"] = section.get("call_count", 0) + 1
     data[role] = section
     prewalk_runtime._atomic_write_json(usage_path, data)
     return {"ok": True, role: section}
@@ -649,8 +661,8 @@ def main(argv: list[str] | None = None) -> int:
             p.add_argument("--timeout", type=float, default=3000)
         if name == "record-usage":
             p.add_argument("--role", default="navigator")
-            p.add_argument("--input", type=int, required=True)
-            p.add_argument("--output", type=int, required=True)
+            p.add_argument("--input", type=int)
+            p.add_argument("--output", type=int)
             p.add_argument("--cache-read", type=int)
             p.add_argument("--cache-creation", type=int)
             p.add_argument("--model")
