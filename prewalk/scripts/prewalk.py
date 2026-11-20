@@ -41,7 +41,12 @@ def detect_navigator_host(explicit: str | None = None) -> tuple[str | None, str]
         return "claude-code", "auto (CLAUDECODE)"
     if any(k.startswith("CODEX_") and k not in ("CODEX_API_KEY", "CODEX_HOME") for k in os.environ):
         return "codex", "auto (CODEX_* env)"
-    if any(k.startswith("KIMI_") for k in os.environ):
+    if (os.environ.get("AI_AGENT", "").lower().startswith("devin")
+            or os.environ.get("DEVIN_FD_PATH")
+            or os.environ.get("DEVIN_SESSION_ID")):
+        return "devin", "auto (DEVIN env)"
+    if any(k.startswith("KIMI_") and k not in ("KIMI_API_KEY", "KIMI_CODE_API_KEY",
+                                               "KIMI_CODE_HOME", "KIMI_BIN") for k in os.environ):
         return "kimi", "auto (KIMI_* env)"
     return None, "unknown (pass --navigator-host)"
 
@@ -126,7 +131,8 @@ def _print_doctor(report: dict[str, Any]) -> None:
 
 
 def setup(backend: str | None, model: str | None, effort: str | None,
-          max_concurrency: int | None, navigator_host: str | None) -> dict[str, Any]:
+          max_concurrency: int | None, navigator_host: str | None,
+          savings: bool | None = None) -> dict[str, Any]:
     try:
         cfg, source = prewalk_config.load()
     except prewalk_config.ConfigError:
@@ -158,6 +164,8 @@ def setup(backend: str | None, model: str | None, effort: str | None,
     if max_concurrency is not None:
         builder["max_concurrency"] = max_concurrency
     cfg["builder"] = builder
+    if savings is not None:
+        cfg["savings"] = savings
     host, _ = detect_navigator_host(navigator_host)
     if host:
         cfg["navigator_host"] = host
@@ -252,6 +260,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--effort", choices=bb.CANONICAL_EFFORTS)
     p.add_argument("--max-concurrency", type=int, choices=(1, 2))
     p.add_argument("--navigator-host", choices=bb.NAVIGATOR_HOSTS)
+    p.add_argument("--savings", dest="savings", action="store_true", default=None,
+                   help="enable optional per-run savings report (small Navigator token cost)")
+    p.add_argument("--no-savings", dest="savings", action="store_false")
     p.add_argument("--json", action="store_true")
     p = sub.add_parser("test", help="Builder round trip in a throwaway git repo")
     p.add_argument("--backend"); p.add_argument("--model")
@@ -281,7 +292,8 @@ def main(argv: list[str] | None = None) -> int:
                 _print_doctor(report)
             return code
         if args.command == "setup":
-            result = setup(args.backend, args.model, args.effort, args.max_concurrency, args.navigator_host)
+            result = setup(args.backend, args.model, args.effort, args.max_concurrency,
+                           args.navigator_host, savings=args.savings)
             if args.json:
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:

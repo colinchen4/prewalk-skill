@@ -65,6 +65,20 @@ elif backend == "kimi":
                 print(handle.read())
         else:
             print("[]")
+elif backend == "devin":
+    if args == ["--version"]:
+        print("devin " + os.environ.get("FAKE_DEVIN_VERSION", "3000.14.30825") + " (fake)")
+        raise SystemExit(0)
+    if args[:2] == ["auth", "status"]:
+        auth = os.environ.get("FAKE_DEVIN_AUTH", "logged_out")
+        if auth == "subscription":
+            print("Logged in (via Devin).\n\nUser:\n  Email: test@example.com")
+            raise SystemExit(0)
+        if auth == "api_key":
+            print("Logged in using an API key.")
+            raise SystemExit(0)
+        print("Not logged in. Run devin.exe auth login.")
+        raise SystemExit(0)
 elif backend == "ctags":
     import json as _json
     import re as _re

@@ -17,16 +17,19 @@ from .base import (BOOTSTRAP, BOOTSTRAP_RESUME, CANONICAL_EFFORTS, FAMILY_OF_HOS
 from .claude_code_sub import ClaudeCodeSub
 from .codex_deepseek_legacy import CodexDeepseekLegacy
 from .codex_sub import CodexSub
+from .devin_sub import DevinSub
 from .kimi_sub import KimiSub
 from .mock import MockBackend
 from .stubs import OpenCodeApi, PiApi
 
 # Order matters: it is the cross-family fallback order (Track A first).
 REGISTRY: dict[str, Backend] = {b.id: b for b in (
-    ClaudeCodeSub(), CodexSub(), KimiSub(), OpenCodeApi(), PiApi(), CodexDeepseekLegacy(), MockBackend(),
+    ClaudeCodeSub(), CodexSub(), KimiSub(), DevinSub(), OpenCodeApi(), PiApi(),
+    CodexDeepseekLegacy(), MockBackend(),
 )}
 ALIASES = {"codex:deepseek": "codex-deepseek", "claude": "claude-code-sub",
-           "claude-code": "claude-code-sub", "codex": "codex-sub", "kimi": "kimi-sub"}
+           "claude-code": "claude-code-sub", "codex": "codex-sub", "kimi": "kimi-sub",
+           "devin": "devin-sub"}
 
 FALLBACK = """No Builder backend is ready. Pick one:
   A) Use your subscription (recommended):
@@ -34,6 +37,7 @@ FALLBACK = """No Builder backend is ready. Pick one:
      codex login                  # ChatGPT Plus/Pro -> Builder: gpt-6-luna
      kimi provider list           # existing Desktop OAuth is reused when managed:* has source=oauth
      kimi login                   # only if no managed Kimi OAuth provider is listed
+     devin auth login             # Devin account   -> Builder: swe-2-high / swe-2-flash-medium
   B) Use an external API with an open agent (phase 2):
      pi:        export DEEPSEEK_API_KEY=...
      opencode:  opencode auth login --provider deepseek

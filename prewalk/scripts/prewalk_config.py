@@ -20,7 +20,8 @@ import prewalk_prefs
 SCHEMA_VERSION = 2
 MAX_CONCURRENCY_LIMIT = 2
 BUILDER_KEYS = ("backend", "model", "effort", "max_concurrency")
-TOP_KEYS = ("schema_version", "builder", "navigator_host", "pairing", "migrated_from", "updated_at")
+TOP_KEYS = ("schema_version", "builder", "navigator_host", "pairing", "savings",
+            "migrated_from", "updated_at")
 SECRET_HINTS = ("key", "token", "secret", "password", "credential", "cookie", "auth")
 
 
@@ -75,6 +76,9 @@ def validate(cfg: Any) -> dict[str, Any]:
         raise ConfigError(f"builder.max_concurrency must be 1..{MAX_CONCURRENCY_LIMIT}")
     b["max_concurrency"] = mc
     out["builder"] = b
+    if "savings" in out and out["savings"] is not None:
+        if not isinstance(out["savings"], bool):
+            raise ConfigError("savings must be a boolean")
     if "pairing" in out and out["pairing"] is not None:
         out["pairing"] = prewalk_prefs.validate_pairing(out["pairing"])
     return out
@@ -125,3 +129,11 @@ def max_concurrency() -> int:
     except ConfigError:
         return 1
     return int(cfg.get("builder", {}).get("max_concurrency", 1))
+
+
+def savings_enabled() -> bool:
+    try:
+        cfg, _ = load()
+    except ConfigError:
+        return False
+    return bool(cfg.get("savings", False))

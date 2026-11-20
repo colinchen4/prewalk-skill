@@ -71,6 +71,7 @@ Builder exploration is opt-in (`prewalk_plan.py create --explore`); without it t
 Install the `prewalk/` directory for your harness:
 
 - **Kimi Code:** `~/.agents/skills/prewalk/` or `<project>/.agents/skills/prewalk/`.
+- **Devin CLI / Desktop:** `%APPDATA%\devin\skills\prewalk\` (Windows), `~/.config/devin/skills/prewalk/` (macOS/Linux), or `<project>/.devin/skills/prewalk/`.
 - **Codex:** `~/.codex/skills/` or a project skill directory.
 - **Claude Code:** `~/.claude/skills/prewalk/` or `<project>/.claude/skills/prewalk/`.
 - **DSH:** load the core through its native profile/plugin mechanism; do not assume automatic Agent Skills discovery.
@@ -80,18 +81,19 @@ Requirements:
 
 - Python 3.11+ and Git. If Windows has no `python3` command, use `python` or `py` instead.
 - A ready Builder backend when delegating. There is no mandatory `doctor → setup → test` wizard.
-- For the verified persistent path, Kimi Code CLI with Desktop OAuth. Legacy adapters have their own requirements documented under `prewalk/adapters/`.
+- For the verified persistent paths, Kimi Code CLI with Desktop OAuth (`kimi-sub`) or Devin CLI with `devin auth login` (`devin-sub`, e.g. Gemini 4 Neon Navigator + SWE-2 / SWE-2 Flash Builder). Legacy adapters have their own requirements documented under `prewalk/adapters/`.
 
 Run read-only model discovery first:
 
 ```sh
-python3 prewalk/scripts/prewalk.py models --navigator-host kimi
+python3 prewalk/scripts/prewalk.py models --navigator-host devin
 ```
 
 Example output:
 
 ```text
 kimi-sub (persistent): models=kimi-code/kimi-for-coding, kimi-code/k3-256k; default=kimi-code/kimi-for-coding/low; efforts=low, high, max
+devin-sub (persistent): models=swe-2-high, swe-2-flash-medium; default=swe-2-high/medium; efforts=medium, high, max
 ```
 
 Navigator defaults to the **current session's model and effective effort**. Builder is chosen from the available models, with `medium` when supported or the backend's documented default. No configuration file is required; a ready saved configuration may supply a Builder default.
@@ -265,6 +267,7 @@ Routing keeps the same ACP session and PID and writes `continuation-compact-1.js
 | Backend | Mode | Default and alternate models | Effort | Validation status |
 | --- | --- | --- | --- | --- |
 | `kimi-sub` | Persistent ACP | `kimi-code/kimi-for-coding`, `kimi-code/k3-256k` | `low`, `high`, `max`; default `low` | ACP and Desktop OAuth live-verified |
+| `devin-sub` | Persistent ACP | `swe-2-high`, `swe-2-flash-medium` | `medium`, `high`, `max`; default `medium` | ACP and Devin OAuth live-verified |
 | `claude-code-sub` | Legacy | `sonnet`, `haiku` | `low` through `max`, default `medium` | Fixture-tested argv/env; not live-run |
 | `codex-sub` | Legacy | `gpt-6-luna`, `gpt-6.1-terra` | `low` through `max`, default `high` | Fixture-tested; effort key and Luna availability unverified |
 | `codex-deepseek` | Legacy, explicit only | `deepseek-flash` | `low`, `medium`, `high` | Optional host-specific manager |
@@ -274,7 +277,7 @@ Routing keeps the same ACP session and PID and writes `continuation-compact-1.js
 Additional rules:
 
 - Track A automatic recommendations require subscription billing, not an API-key login.
-- Blocked as Builder: Claude `best`, `fable`, `opus*`, `opusplan`, `default`; Codex Sol/Astra; Kimi `kimi-for-coding-highspeed`.
+- Blocked as Builder: Claude `best`, `fable`, `opus*`, `opusplan`, `default`; Codex Sol/Astra; Kimi `kimi-for-coding-highspeed`; Devin `neon`, `argon`, `carbon`, `hydrogen`, `opus`, `fable`, `sol`, `astra`, `fusion`, `adaptive`, `lightning`, `pro`, `ultra`.
 - Unsupported effort maps only downward. A request below the backend minimum is rejected; it never rounds up.
 - Model/effort selection is validated at launch. Configuration alone is not proof of effective routing.
 
@@ -288,9 +291,11 @@ Additional rules:
 - `usage.json` separates Builder usage from Navigator `not_collected`; missing usage is `unavailable` or `not_collected`, never zero.
 - Cost is assessed per accepted task, including rework and final review quality, not just model unit price.
 
-### Per-run savings estimate
+### Per-run savings estimate (optional)
 
-On every terminal status (`approved`, `discarded`, `failed`, `cancelled`, `merge_conflict`) the supervisor runs `prewalk_savings.py`, which writes `savings.json`/`savings.md`, stores a `savings` block in `state.json`, and appends one history line per run to `~/.prewalk/savings-history.jsonl`. A report failure is recorded in `savings.json` and never changes the run status.
+Savings reporting is **opt-in (off by default)** because displaying savings adds a small Navigator token cost (extra stdout fields on `approve --wait` / `status`, an optional `record-usage` call on non-Kimi hosts, and reply formatting). Enable it per run with `prewalk_plan.py create --savings`, via `PREWALK_SAVINGS=1`, persistently via `prewalk.py setup --savings`, or on demand after any run with `prewalk_builder.py report --run-dir <run-dir>`.
+
+When enabled, on terminal status (`approved`, `discarded`, `failed`, `cancelled`, `merge_conflict`) the supervisor runs `prewalk_savings.py`, which writes `savings.json`/`savings.md`, stores a `savings` block in `state.json`, and appends one history line per run to `~/.prewalk/savings-history.jsonl`. A report failure is recorded in `savings.json` and never changes the run status.
 
 The estimate compares what the run cost against what the Navigator would have cost doing all the work:
 
@@ -384,7 +389,7 @@ Validation status is backend-specific. These results do not mean every adapter o
 
 ## Compatibility and limitations
 
-- **Kimi ACP is the verified persistent backend.** Other backends are `legacy` unless they implement the same live-session contract.
+- **Kimi ACP (`kimi-sub`) and Devin ACP (`devin-sub`) are the verified persistent backends.** Other backends are `legacy` unless they implement the same live-session contract.
 - `opencode-api` and `pi-api` are registry stubs, not launch-ready.
 - Claude/Codex subscription argv/env behavior is fixture-tested; exact live flags, plan quotas, and Codex effort configuration are not universally verified.
 - Cache hits and savings are provider- and TTL-dependent. Prewalk records evidence rather than claiming a fixed improvement.

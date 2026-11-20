@@ -46,7 +46,10 @@ def validate_plan(raw: Any) -> dict[str, Any]:
         raise ValueError("validation must be a list of command strings")
     if not isinstance(raw.get("explore", False), bool):
         raise ValueError("explore must be a boolean")
-    return {**raw, "explore": raw.get("explore", False),
+    savings = raw.get("savings")
+    if savings is not None and not isinstance(savings, bool):
+        raise ValueError("savings must be a boolean when set")
+    return {**raw, "explore": raw.get("explore", False), "savings": savings,
             "builder_required": raw["mode"] != "navigator_only"}
 
 
@@ -54,12 +57,15 @@ def create_plan(handoff_id: str, mode: str, goal: str, success: list[str], scope
                 context: str = "", cwd: str | None = None,
                 validation: list[str] | None = None,
                 model: str | None = None, effort: str | None = None,
-                explore: bool = False) -> dict[str, Any]:
-    return validate_plan({"schema_version": 1, "status": "planned", "handoff_id": handoff_id,
-                          "mode": mode, "goal": goal, "success": success,
-                          "scope": scope, "context": context, "cwd": cwd or str(Path.cwd()),
-                          "validation": validation or [], "model": model, "effort": effort,
-                          "explore": explore})
+                explore: bool = False, savings: bool | None = None) -> dict[str, Any]:
+    plan: dict[str, Any] = {"schema_version": 1, "status": "planned", "handoff_id": handoff_id,
+                            "mode": mode, "goal": goal, "success": success,
+                            "scope": scope, "context": context, "cwd": cwd or str(Path.cwd()),
+                            "validation": validation or [], "model": model, "effort": effort,
+                            "explore": explore}
+    if savings is not None:
+        plan["savings"] = savings
+    return validate_plan(plan)
 
 
 def write_plan(run_dir: Path, plan: dict[str, Any]) -> Path:
@@ -94,6 +100,9 @@ def main(argv: list[str] | None = None) -> int:
     create.add_argument("--model")
     create.add_argument("--effort")
     create.add_argument("--explore", action="store_true")
+    create.add_argument("--savings", dest="savings", action="store_true", default=None,
+                        help="opt in to per-run savings report (adds a small Navigator token cost)")
+    create.add_argument("--no-savings", dest="savings", action="store_false")
     validate = sub.add_parser("validate")
     validate.add_argument("--plan", required=True, type=Path)
     args = parser.parse_args(argv)
@@ -101,7 +110,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "create":
             plan = create_plan(args.handoff_id, args.mode, args.goal, args.success, args.scope,
                                context=args.context, cwd=args.cwd, validation=args.validation,
-                               model=args.model, effort=args.effort, explore=args.explore)
+                               model=args.model, effort=args.effort, explore=args.explore,
+                               savings=args.savings)
             path = write_plan(args.run_dir, plan)
             result = {"ok": True, "plan": str(path), "builder_required": plan["builder_required"]}
         else:

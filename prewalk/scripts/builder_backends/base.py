@@ -21,13 +21,14 @@ CANONICAL_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max")
 
 # Runtime parser hosts understood by ``prewalk_runtime.py inspect --host``.
 # This is the single source of truth; prewalk_runtime and prewalk_async import it.
-RUNTIME_HOSTS = ("kimi", "codex", "claude-code", "dsh", "generic")
+RUNTIME_HOSTS = ("kimi", "codex", "claude-code", "devin", "dsh", "generic")
 
 # Navigator host -> Builder family it pairs with by default.
 FAMILY_OF_HOST = {
     "claude-code": "claude-code",
     "codex": "codex",
     "kimi": "kimi",
+    "devin": "devin",
     "opencode": "opencode",
     "pi": "pi",
 }

@@ -29,6 +29,7 @@ from typing import Any, Iterable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from builder_backends.base import RUNTIME_HOSTS  # noqa: E402  (single host list)
+from builder_backends.devin_sub import effective_model_slug as _devin_model_slug  # noqa: E402
 
 
 SCHEMA_VERSION = 2
@@ -1494,6 +1495,162 @@ def _generic_usage(
     )
 
 
+def _devin_usage(
+    events: list[tuple[int, dict[str, Any]]], builder_turn: int,
+    expected_session: str | None,
+) -> tuple[str, str, dict[str, Any]]:
+    """Read once per prompt, not once per usage update or per model call."""
+    def obj(value: Any) -> dict[str, Any]:
+        return value if isinstance(value, dict) else {}
+
+    def tokens(value: Any) -> int | None:
+        if type(value) is int and value >= 0:
+            return value
+        if isinstance(value, float) and value >= 0 and value.is_integer():
+            return int(value)
+        return None
+
+    requests: dict[int, str] = {}
+    session: str | None = None
+    active_prompt: int | None = None
+    chunks: list[str] = []
+    prompt_usage_calls = 0
+    completed: list[tuple[dict[str, Any], str, int]] = []
+    stats: dict[tuple[str, str], dict[str, Any]] = {}
+    for _, envelope in events:
+        msg = obj(envelope.get("message"))
+        method, request_id = msg.get("method"), msg.get("id")
+        params = obj(msg.get("params"))
+        if envelope.get("direction") == "navigator" and type(request_id) is int:
+            if method in ("session/new", "session/prompt"):
+                requests[request_id] = method
+            if method == "session/prompt":
+                if not session or params.get("sessionId") != session or active_prompt is not None:
+                    raise InspectError("Devin prompt does not belong to one sequential Builder session")
+                active_prompt, chunks, prompt_usage_calls = request_id, [], 0
+        if envelope.get("direction") != "agent":
+            continue
+        if method == "_cognition.ai/turn_stats":
+            sid, turn_id = params.get("sessionId"), params.get("turnClientMessageId")
+            if isinstance(sid, str) and isinstance(turn_id, str):
+                stats[sid, turn_id] = params
+        elif method == "session/update" and active_prompt is not None:
+            update = obj(params.get("update"))
+            if params.get("sessionId") == session:
+                kind = update.get("sessionUpdate")
+                if kind == "agent_message_chunk":
+                    text = obj(update.get("content")).get("text")
+                    if isinstance(text, str):
+                        chunks.append(text)
+                elif kind == "usage_update":
+                    meta = obj(update.get("_meta"))
+                    if "cognition.ai/subagent_context" not in meta:
+                        prompt_usage_calls += 1
+        elif method is None and type(request_id) is int:
+            request = requests.pop(request_id, None)
+            result = obj(msg.get("result"))
+            if request == "session/new":
+                candidate = result.get("sessionId")
+                if session or not isinstance(candidate, str) or not candidate:
+                    raise InspectError("Devin events do not identify exactly one Builder session")
+                session = candidate
+            elif request == "session/prompt":
+                if request_id != active_prompt or result.get("stopReason") != "end_turn":
+                    raise InspectError("Devin prompt did not complete with end_turn")
+                completed.append((result, "".join(chunks), prompt_usage_calls))
+                active_prompt = None
+
+    if not session:
+        raise InspectError("Devin events contain no Builder session id")
+    if expected_session is not None and session != expected_session:
+        raise InspectError(f"Builder session mismatch: expected {expected_session} but events report {session}")
+    if len(completed) < builder_turn:
+        raise InspectError(f"Devin events contain no completed Builder turn {builder_turn}")
+
+    turns: list[dict[str, Any]] = []
+    calls: list[dict[str, Any]] = []
+    models: list[str] = []
+    for turn, (result, _, usage_calls) in enumerate(completed[:builder_turn], 1):
+        turn_id = obj(result.get("_meta")).get("cognition.ai/userMessageId")
+        summary = stats.get((session, turn_id), {}) if isinstance(turn_id, str) else {}
+        dimensions = summary.get("responseDimensions")
+        dims = {row["uid"]: obj(row.get("kind"))
+                for raw in (dimensions if isinstance(dimensions, list) else [])
+                if isinstance((row := obj(raw)).get("uid"), str)}
+        label = dims.get("model", {}).get("value")
+        model = _devin_model_slug(label) if isinstance(label, str) and label else None
+        if model and model not in models:
+            models.append(model)
+        usage: dict[str, Any] = {}
+        for key in ("input_tokens", "output_tokens", "cached_input_tokens"):
+            metric = dims.get(key, {})
+            value = tokens(metric.get("value")) if metric.get("type") == "cumulativeMetric" else None
+            if value is not None:
+                usage[key] = value
+        if usage.get("cached_input_tokens", 0) > usage.get("input_tokens", 0):
+            usage.pop("cached_input_tokens", None)
+        turn_call_count: int | None = usage_calls if usage_calls > 0 else None
+        if turn_call_count is None:
+            msg_metric = dims.get("agent_messages", {})
+            if msg_metric.get("type") == "cumulativeMetric":
+                turn_call_count = tokens(msg_metric.get("value"))
+        if {"input_tokens", "output_tokens"}.issubset(usage):
+            cached = usage.get("cached_input_tokens", 0)
+            usage["inputOther"] = usage["input_tokens"] - cached
+            usage["inputCacheRead"] = cached
+            usage["inputCacheCreation"] = 0
+            usage["output"] = usage["output_tokens"]
+            calls.append({
+                "call": len(calls) + 1,
+                "builder_turn": turn,
+                "turn_call": 1,
+                "model": model,
+                "usage": {
+                    "inputOther": usage["inputOther"],
+                    "inputCacheRead": usage["inputCacheRead"],
+                    "inputCacheCreation": 0,
+                    "output": usage["output"],
+                },
+            })
+        turns.append({"turn": turn, "model": model, "totals": usage or None,
+                      "call_count": turn_call_count})
+
+    complete_turns = sum(
+        {"input_tokens", "output_tokens"}.issubset(turn["totals"] or {}) for turn in turns
+    )
+    # Publish only totals whose metric was reported on every completed turn.
+    totals = {key: sum(turn["totals"][key] for turn in turns)
+              for key in ("input_tokens", "output_tokens", "cached_input_tokens",
+                          "inputOther", "inputCacheRead", "inputCacheCreation", "output")
+              if all(key in (turn["totals"] or {}) for turn in turns)}
+    if "input_tokens" in totals:
+        totals["input_total"] = totals["input_tokens"]
+    ratio = _ratio(totals.get("cached_input_tokens"), totals.get("input_tokens"))
+    if ratio is not None:
+        totals["cache_read_ratio"] = ratio
+    total_calls = (sum(turn["call_count"] for turn in turns)
+                   if all(isinstance(turn["call_count"], int) for turn in turns) else None)
+    status = ("available" if complete_turns == builder_turn else
+              "partial" if any(turn["totals"] for turn in turns) else "unavailable")
+    usage_report = {
+        "host": "devin", "session_id": session, "builder_turn": builder_turn,
+        "turn_count": builder_turn, "call_count": total_calls, "turns": turns,
+        "calls": calls, "models": models, "totals": totals or None, "usage_status": status,
+        "source": {"type": "acp_turn_stats"}, "skipped_scope_count": 0,
+        "cache_ratio_denominator": "input_total" if ratio is not None else None,
+        "cost": None, "cost_status": "unavailable", "cost_scope": None,
+    }
+    if status != "available":
+        usage_report["usage_error"] = "Devin did not report complete correlated turn token metrics"
+    return session, completed[builder_turn - 1][1], usage_report
+
+
+def _devin_acp_usage(session_id: str, events_path: Path, builder_turn: int) -> dict[str, Any]:
+    events = _read_jsonl(events_path)
+    _, _, usage = _devin_usage(events, builder_turn, session_id)
+    return usage
+
+
 def inspect(
     host: str,
     events_path: Path,
@@ -1526,6 +1683,8 @@ def inspect(
             prior,
             events_path,
         )
+    elif host == "devin":
+        session_id, final_message, usage = _devin_usage(events, builder_turn, expected_session)
     elif host == "codex":
         session_id = _codex_session_id(events)
         final_message = _codex_final_message(events)
