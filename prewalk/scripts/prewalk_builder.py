@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import builder_backends
+from builder_backends import devin_sub
 import persistent_backends
 import prewalk_async
 import prewalk_hash
@@ -113,6 +115,21 @@ def launch(run_dir: Path, plan_path: Path, backend_id: str) -> dict[str, Any]:
         raise ValueError("navigator_only plan must not launch Builder")
     if not plan["validation"] and not plan.get("allow_unverified"):
         raise ValueError("validation commands are required for independent acceptance")
+    spec = builder_backends.get(backend_id)
+    backend_id = spec.id
+    model = plan.get("model")
+    effort = plan.get("effort")
+    if backend_id == "devin-sub":
+        model = spec.check_model(model or spec.weak_model)
+        if effort is None and not plan.get("model"):
+            effort = spec.weak_effort
+        if effort is not None:
+            spec.resolve_effort(effort, model)
+    elif backend_id != "mock":
+        if model is not None:
+            model = spec.check_model(model)
+        if effort is not None:
+            spec.resolve_effort(effort, model)
     source = Path(plan["cwd"]).resolve()
     root = prewalk_layers.repo_root(source)
     if root is None:
@@ -144,7 +161,7 @@ def launch(run_dir: Path, plan_path: Path, backend_id: str) -> dict[str, Any]:
         prewalk_layers.git(root, "worktree", "add", "--detach", str(builder_wt), base_sha)
         state = {"schema_version": 1, "handoff_id": plan["handoff_id"], "status": "starting",
                  "phase": "PLANNED", "mode": plan["mode"], "backend": backend_id,
-                 "model": plan.get("model"), "effort": plan.get("effort"),
+                 "model": model, "effort": effort,
                  "source_worktree": str(source), "builder_worktree": str(builder_wt),
                  "base_layer": base_layer, "base_sha": base_sha, "plan": str(plan_path),
                  "cache_key": f"prewalk/{plan['handoff_id']}",
@@ -218,9 +235,22 @@ def build_review(run_dir: Path) -> dict[str, Any]:
 def record_config_evidence(state: dict[str, Any], backend: persistent_backends.JsonRpcBackend) -> None:
     evidence = backend.current_config()
     state["config_evidence"] = evidence
-    actual = evidence.get("model")
+    actual = evidence.get("effective_model") or evidence.get("model")
     state["observed_model"] = actual
     requested = state.get("model")
+    if state.get("backend") == "devin-sub":
+        if requested and actual:
+            matched = devin_sub.models_match(requested, state.get("effort"),
+                                             evidence.get("model"), evidence.get("thought_level"))
+            if matched:
+                state["model_status"] = "verified"
+                state.pop("model_warning", None)
+            else:
+                state["model_status"] = "warning"
+                state["model_warning"] = f"requested {requested}, ACP reports {actual}"
+        else:
+            state["model_status"] = "unverified"
+        return
     if requested and actual == requested:
         state["model_status"] = "verified"
         state.pop("model_warning", None)
@@ -236,15 +266,18 @@ def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
     if spy:
         with open(spy, "a", encoding="utf-8") as handle:
             handle.write(str(turn) + chr(10))
-    if state["backend"] != "kimi-sub":
+    if state["backend"] not in ("kimi-sub", "devin-sub"):
         state["usage_status"] = "unavailable"
         return
     session = state["session_id"]
     events = run_dir / "builder-events.jsonl"
     direct_path = run_dir / "builder-usage.json"
     try:
-        prior = prewalk_runtime._load_prior_usage(direct_path, "kimi", session, turn) if turn > 1 else None
-        usage = prewalk_runtime._kimi_usage(session, Path(state["builder_worktree"]), turn, prior, events)
+        if state["backend"] == "kimi-sub":
+            prior = prewalk_runtime._load_prior_usage(direct_path, "kimi", session, turn) if turn > 1 else None
+            usage = prewalk_runtime._kimi_usage(session, Path(state["builder_worktree"]), turn, prior, events)
+        else:
+            usage = prewalk_runtime._devin_acp_usage(session, events, turn)
     except (prewalk_runtime.InspectError, OSError, ValueError) as exc:
         usage = {"usage_status": "unavailable", "usage_error": str(exc), "models": []}
     prewalk_runtime._atomic_write_json(direct_path, usage)
@@ -264,9 +297,20 @@ def collect_usage(run_dir: Path, state: dict[str, Any], turn: int) -> None:
     state["cache_usage"] = usage.get("totals")
     state["observed_models"] = usage.get("models") or []
     requested = state.get("model")
-    if requested and state["observed_models"] and requested not in state["observed_models"]:
-        state["model_status"] = "warning"
-        state["model_warning"] = f"requested {requested}, usage reports {state['observed_models']}"
+    if requested and state["observed_models"]:
+        if state["backend"] == "devin-sub":
+            turns = usage.get("turns") or []
+            latest_model = turns[-1].get("model") if turns and isinstance(turns[-1], dict) else None
+            if latest_model:
+                matched = devin_sub.models_match(requested, state.get("effort"), latest_model)
+            else:
+                matched = any(devin_sub.models_match(requested, state.get("effort"), obs)
+                              for obs in state["observed_models"])
+        else:
+            matched = requested in state["observed_models"]
+        if not matched:
+            state["model_status"] = "warning"
+            state["model_warning"] = f"requested {requested}, usage reports {state['observed_models']}"
 
 
 def apply_review(run_dir: Path) -> None:
@@ -315,6 +359,12 @@ def queue(run_dir: Path, command: str, text: str = "", model: str | None = None,
             raise ValueError("route requires a model or effort change")
         if not prewalk_plan.ID_RE.match(compaction_id):
             raise ValueError("route requires a valid compaction_id")
+        if state.get("backend") != "mock":
+            spec = builder_backends.get(state["backend"])
+            if model:
+                spec.check_model(model)
+            if effort:
+                spec.resolve_effort(effort, model or state.get("model"))
     if command == "discard" and state["status"] in TERMINAL:
         if state["status"] == "discarded":
             return {"ok": True, "status": "discarded"}
@@ -407,6 +457,10 @@ def supervise(run_dir: Path) -> int:
                     backend.configure(command.get("model"), command.get("effort"))
                     if command.get("model"):
                         state["model"] = command["model"]
+                        if not command.get("effort") and state.get("backend") == "devin-sub":
+                            _, suffix = devin_sub.split_model_effort(command["model"])
+                            if suffix:
+                                state["effort"] = suffix
                     if command.get("effort"):
                         state["effort"] = command["effort"]
                     record_config_evidence(state, backend)
@@ -508,15 +562,16 @@ def supervise(run_dir: Path) -> int:
         state["status"] = final_status
         state["phase"] = final_status
         state["ended_at"] = _now()
-        try:
-            report = prewalk_savings.run_report(run_dir, state, plan)
-            summary = prewalk_savings.summary_block(report)
-            if summary:
-                state["savings"] = summary
-        except Exception as exc:
-            prewalk_runtime._atomic_write_json(run_dir / "savings.json",
-                                               {"schema_version": 1, "mode": "error",
-                                                "error": str(exc), "generated_at": _now()})
+        if prewalk_savings.is_enabled(plan):
+            try:
+                report = prewalk_savings.run_report(run_dir, state, plan)
+                summary = prewalk_savings.summary_block(report)
+                if summary:
+                    state["savings"] = summary
+            except Exception as exc:
+                prewalk_runtime._atomic_write_json(run_dir / "savings.json",
+                                                   {"schema_version": 1, "mode": "error",
+                                                    "error": str(exc), "generated_at": _now()})
         _write_state(run_dir, state)
         prewalk_async._release_active(run_dir)
         _event(run_dir, {"state": final_status, "error": state.get("error")})

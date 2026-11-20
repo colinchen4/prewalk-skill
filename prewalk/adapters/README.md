@@ -8,6 +8,7 @@ Prewalk core is independent of the Navigator harness, Builder harness, model ven
 | --- | --- | --- |
 | `codex` | [codex.md](codex.md) | Live-validated in prior managed Codex runs; not re-run by the harness-neutral change. |
 | `kimi` | [kimi.md](kimi.md) | Live-validated in prior local Kimi Code runs; not re-run by the harness-neutral change. |
+| `devin` | [devin.md](devin.md) | Persistent `devin-sub` ACP path (SWE-2 / SWE-2 Flash) fixture-tested and live-verified. |
 | `claude-code` | [claude-code.md](claude-code.md) | Installed CLI inspected and an unauthenticated probe rejected; success/resume paths are fixture-tested only. |
 | `dsh` | [dsh.md](dsh.md) | Fixture-tested only; DSH is not installed here. |
 | `generic` | [this file](#other-harnesses-normalized-event-shim) | Contract plus fixture tests. Requires a thin host shim; not automatic support. |

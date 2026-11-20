@@ -38,9 +38,10 @@ class FakePathCase(unittest.TestCase):
 class RegistryTests(unittest.TestCase):
     def test_registry_ids_and_aliases(self):
         ids = [b.id for b in bb.listed()]
-        self.assertEqual(ids, ["claude-code-sub", "codex-sub", "kimi-sub", "opencode-api", "pi-api",
-                               "codex-deepseek"])
+        self.assertEqual(ids, ["claude-code-sub", "codex-sub", "kimi-sub", "devin-sub",
+                               "opencode-api", "pi-api", "codex-deepseek"])
         self.assertIs(bb.get("codex:deepseek"), bb.REGISTRY["codex-deepseek"])
+        self.assertIs(bb.get("devin"), bb.REGISTRY["devin-sub"])
         self.assertEqual(bb.get("mock").id, "mock")
         with self.assertRaises(bb.BackendError):
             bb.get("nope")

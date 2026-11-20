@@ -14,7 +14,9 @@ from typing import Any
 
 import prewalk_hash
 import prewalk_runtime
-from builder_backends.base import child_env
+from builder_backends.base import BackendError, child_env
+from builder_backends.devin_sub import (DevinSub, effective_model_slug, find_devin_binary,
+                                        resolve_acp_model_option)
 from builder_backends.process import popen_group_kwargs
 
 BUILDER_ENV_REMOVE = (
@@ -22,6 +24,8 @@ BUILDER_ENV_REMOVE = (
     "ANTHROPIC_DEFAULT_*", "CLAUDE_CODE_EFFORT_LEVEL", "OPENAI_API_KEY", "OPENAI_BASE_URL",
     "OPENAI_MODEL", "CODEX_API_KEY", "DEEPSEEK_API_KEY", "KIMI_API_KEY", "KIMI_CODE_API_KEY",
     "KIMI_MODEL", "KIMI_DEFAULT_MODEL", "KIMI_CODE_MODEL", "KIMI_CODE_DEFAULT_MODEL",
+    "ACP_BACKEND", "DEVIN_MODEL", "DEVIN_PERMISSION_MODE", "DEVIN_REFUSAL_FALLBACK",
+    "DEVIN_VERBOSITY", "WINDSURF_API_KEY", "WINDSURF_IDE_TYPE", "WINDSURF_EXT_HOST_PID",
 )
 
 
@@ -49,6 +53,9 @@ def binary_integrity(path: str) -> dict[str, Any]:
 
 
 class JsonRpcBackend:
+    effort_config_id = "thinking"
+    auto_mode_id = "auto"
+
     def __init__(self, argv: list[str], cwd: Path, run_dir: Path,
                  env: dict[str, str] | None = None, integrity: dict[str, Any] | None = None):
         self.cwd = Path(cwd)
@@ -167,6 +174,13 @@ class JsonRpcBackend:
             except queue.Empty:
                 continue
             deadline = time.monotonic() + effective
+            self._handle_notification(message)
+            if ("method" in message and "id" in message
+                    and "result" not in message and "error" not in message):
+                self._send({"jsonrpc": "2.0", "id": message["id"],
+                            "error": {"code": -32601,
+                                      "message": f"unsupported client method: {message['method']}"}})
+                continue
             text = self._update_text(message)
             if text:
                 chunks.append(text)
@@ -181,6 +195,18 @@ class JsonRpcBackend:
             self.last_text = "".join(chunks)
             return message.get("result") or {}
 
+    def _handle_notification(self, message: dict[str, Any]) -> None:
+        if message.get("method") != "session/update":
+            return
+        params = message.get("params") or {}
+        if self.session_id and params.get("sessionId") not in (None, self.session_id):
+            return
+        update = params.get("update") or {}
+        if update.get("sessionUpdate") == "config_option_update":
+            options = update.get("configOptions")
+            if isinstance(options, list) and options:
+                self.config_options = options
+
     def start(self, model: str | None = None, effort: str | None = None) -> str:
         self.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
         result = self.call("session/new", {"cwd": str(self.cwd), "mcpServers": [],
@@ -188,9 +214,9 @@ class JsonRpcBackend:
         self.session_id = result.get("sessionId")
         if not self.session_id:
             raise PersistentError("session/new returned no sessionId")
-        self.config_options = result.get("configOptions") or []
+        self.config_options = result.get("configOptions") or self.config_options
         self.configure(model, effort)
-        self.call("session/set_mode", {"sessionId": self.session_id, "modeId": "auto"})
+        self.call("session/set_mode", {"sessionId": self.session_id, "modeId": self.auto_mode_id})
         return self.session_id
 
     def configure(self, model: str | None = None, effort: str | None = None) -> None:
@@ -202,7 +228,8 @@ class JsonRpcBackend:
             self.config_options = result.get("configOptions") or self.config_options
         if effort:
             result = self.call("session/set_config_option", {"sessionId": self.session_id,
-                                                             "configId": "thinking", "value": effort})
+                                                             "configId": self.effort_config_id,
+                                                             "value": effort})
             self.config_options = result.get("configOptions") or self.config_options
 
     def current_config(self) -> dict[str, Any]:
@@ -243,6 +270,73 @@ class JsonRpcBackend:
             self.proc.stdin.close()
 
 
+class DevinJsonRpcBackend(JsonRpcBackend):
+    """Devin CLI ACP backend (`devin acp`) using `thought_level` and `bypass` mode."""
+
+    effort_config_id = "thought_level"
+    auto_mode_id = "bypass"
+
+    def _option(self, config_id: str) -> dict[str, Any] | None:
+        return next((opt for opt in self.config_options if opt.get("id") == config_id), None)
+
+    def start(self, model: str | None = None, effort: str | None = None) -> str:
+        spec = DevinSub()
+        chosen_model = model or spec.weak_model
+        chosen_effort = effort if (model or effort) else spec.weak_effort
+        self.call("initialize", {"protocolVersion": 1, "clientCapabilities": {}})
+        result = self.call("session/new", {"cwd": str(self.cwd), "mcpServers": [],
+                                           "additionalDirectories": [str(self.run_dir)]})
+        self.session_id = result.get("sessionId")
+        if not self.session_id:
+            raise PersistentError("session/new returned no sessionId")
+        self.config_options = result.get("configOptions") or self.config_options
+        self.configure(chosen_model, chosen_effort)
+        if self._option("mode") is not None:
+            mode_res = self.call("session/set_config_option",
+                                 {"sessionId": self.session_id, "configId": "mode",
+                                  "value": self.auto_mode_id})
+            self.config_options = mode_res.get("configOptions") or self.config_options
+        else:
+            self.call("session/set_mode", {"sessionId": self.session_id, "modeId": self.auto_mode_id})
+        return self.session_id
+
+    def configure(self, model: str | None = None, effort: str | None = None) -> None:
+        if not self.session_id:
+            raise PersistentError("Builder session has not started")
+        spec = DevinSub()
+        target_model = model
+        target_effort = effort
+        if target_model:
+            try:
+                target_model = spec.check_model(target_model)
+            except BackendError as exc:
+                raise PersistentError(str(exc)) from exc
+            model_opt = self._option("model") or {}
+            options = model_opt.get("options") if isinstance(model_opt.get("options"), list) else []
+            target_model, target_effort = resolve_acp_model_option(target_model, options, target_effort)
+            result = self.call("session/set_config_option", {"sessionId": self.session_id,
+                                                             "configId": "model",
+                                                             "value": target_model})
+            self.config_options = result.get("configOptions") or self.config_options
+        if target_effort:
+            try:
+                resolved_effort = spec.resolve_effort(target_effort, target_model)
+            except BackendError as exc:
+                raise PersistentError(str(exc)) from exc
+            if resolved_effort and self._option(self.effort_config_id) is not None:
+                result = self.call("session/set_config_option", {"sessionId": self.session_id,
+                                                                 "configId": self.effort_config_id,
+                                                                 "value": resolved_effort})
+                self.config_options = result.get("configOptions") or self.config_options
+
+    def current_config(self) -> dict[str, Any]:
+        cfg = super().current_config()
+        effective = effective_model_slug(cfg.get("model"), cfg.get(self.effort_config_id))
+        if effective:
+            cfg["effective_model"] = effective
+        return cfg
+
+
 def create_backend(backend_id: str, cwd: Path, run_dir: Path,
                    model: str | None, effort: str | None) -> JsonRpcBackend:
     if backend_id == "mock":
@@ -258,4 +352,9 @@ def create_backend(backend_id: str, cwd: Path, run_dir: Path,
         return JsonRpcBackend([executable, "acp"], cwd, run_dir,
                               child_env(os.environ, BUILDER_ENV_REMOVE),
                               integrity=binary_integrity(executable))
+    if backend_id in ("devin-sub", "devin"):
+        executable = find_devin_binary() or "devin"
+        return DevinJsonRpcBackend([executable, "acp"], cwd, run_dir,
+                                   child_env(os.environ, BUILDER_ENV_REMOVE),
+                                   integrity=binary_integrity(executable))
     raise PersistentError(f"{backend_id}: persistent Builder is not implemented; use the legacy adapter")

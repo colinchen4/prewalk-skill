@@ -59,6 +59,18 @@ def history_path() -> Path:
     return prewalk_config.home_dir() / "savings-history.jsonl"
 
 
+def is_enabled(plan: dict[str, Any] | None = None) -> bool:
+    """Savings reporting is opt-in (off by default to avoid extra Navigator token cost)."""
+    if isinstance(plan, dict) and isinstance(plan.get("savings"), bool):
+        return plan["savings"]
+    raw = os.environ.get("PREWALK_SAVINGS", "").strip().lower()
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    return prewalk_config.savings_enabled()
+
+
 def load_prices(path: Path | None = None) -> dict[str, Any]:
     path = path or prices_path()
     raw = json.loads(prewalk_runtime._read_text_with_retry(path))
@@ -192,13 +204,15 @@ def _recorded_navigator(run_dir: Path) -> dict[str, Any] | None:
     models = section.get("models")
     model = (next((m for m in models if isinstance(m, str) and m), None)
              if isinstance(models, list) else None)
-    if isinstance(section.get("totals"), dict) or isinstance(section.get("calls"), list):
+    has_totals = isinstance(section.get("totals"), dict) and bool(section["totals"])
+    has_calls = isinstance(section.get("calls"), list) and bool(section["calls"])
+    if has_totals or has_calls:
         by_model = _section_by_model(section)
         return {"tokens": _sum_tokens(by_model), "by_model": by_model,
                 "model": _primary_model(by_model) or model, "status": "recorded"}
     if model:
         return {"tokens": None, "by_model": None, "model": model,
-                "status": section.get("usage_status") or "not_collected"}
+                "status": "not_collected"}
     return None
 
 

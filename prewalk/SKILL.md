@@ -5,7 +5,7 @@ description: "Run an orchestrated Prewalk coding handoff: Navigator (the parent 
 
 # Prewalk
 
-Transfer an evidence-backed coding trajectory from Navigator through a configured Builder executor and back to Navigator review. Do not substitute a prose plan for contact with the code. The persistent `kimi-sub` path needs only this file and [adapters/kimi.md](adapters/kimi.md); the legacy one-shot protocol lives in [references/legacy-oneshot.md](references/legacy-oneshot.md).
+Transfer an evidence-backed coding trajectory from Navigator through a configured Builder executor and back to Navigator review. Do not substitute a prose plan for contact with the code. Persistent ACP paths (`devin-sub`, `kimi-sub`) need only this file and the active host's adapter ([adapters/devin.md](adapters/devin.md) on Devin or [adapters/kimi.md](adapters/kimi.md) on Kimi — do not read other hosts' adapters); the legacy one-shot protocol lives in [references/legacy-oneshot.md](references/legacy-oneshot.md).
 
 ## Roles and harness independence
 
@@ -80,10 +80,10 @@ Do not start any Builder process for exploration. Classify after Navigator has e
 
 ### Dispatch at the Builder boundary (persistent protocol)
 
-Allocate the run directory outside the source worktree. `kimi-sub` uses ACP over stdio; backends without a persistent driver must fail explicitly or use the documented legacy path ([legacy-oneshot.md](references/legacy-oneshot.md)).
+Allocate the run directory outside the source worktree. `kimi-sub` and `devin-sub` use ACP over stdio; backends without a persistent driver must fail explicitly or use the documented legacy path ([legacy-oneshot.md](references/legacy-oneshot.md)).
 
 ```sh
-python "<installed-prewalk>/scripts/prewalk_builder.py" launch --run-dir "<run-dir>" --plan "<run-dir>/plan.json" --backend kimi-sub
+python "<installed-prewalk>/scripts/prewalk_builder.py" launch --run-dir "<run-dir>" --plan "<run-dir>/plan.json" --backend <kimi-sub|devin-sub>
 python "<installed-prewalk>/scripts/prewalk_builder.py" execute --run-dir "<run-dir>" --text "<short execute delta>" --wait
 # inspect builder-review.patch, builder-review.json, validation/
 python "<installed-prewalk>/scripts/prewalk_builder.py" approve --run-dir "<run-dir>" --wait
@@ -91,7 +91,7 @@ python "<installed-prewalk>/scripts/prewalk_builder.py" approve --run-dir "<run-
 
 With `explore` off (the default), launch goes straight to `AWAITING_NAVIGATOR`; the first `execute` prompt carries the full plan and later prompts are deltas only. With `explore` on, the exploration reply is stored in `turn-001-reply.md` and `CONTRADICTION:` lines land in `state.exploration_contradictions`.
 
-`status` prints a compact summary: status, `idle`, `terminal`, `execution_count`, `handled_command_seq`, validation records, `has_diff`, `changed_files` (count), `changed_paths` (first 10), model status/warning, route recommendation, error, and the `savings` block; `status --full` dumps the complete state. `--wait` (default 3000 s, `--timeout` to change) is available on `execute`, `approve`, `discard`, and `cancel`; if it returns `"idle": false`, re-run it or inspect with `status`. A reply ending in `NOTE:` surfaces as `builder_note` only on `VALIDATION_FAILED`/`failed`. `cancel --wait` ends the run as `cancelled` and preserves the worktree.
+`status` prints a compact summary: status, `idle`, `terminal`, `execution_count`, `handled_command_seq`, validation records, `has_diff`, `changed_files` (count), `changed_paths` (first 10), model status/warning, route recommendation, error, and (only when savings reporting is opted in) the `savings` block; `status --full` dumps the complete state. `--wait` (default 3000 s, `--timeout` to change) is available on `execute`, `approve`, `discard`, and `cancel`; if it returns `"idle": false`, re-run it or inspect with `status`. A reply ending in `NOTE:` surfaces as `builder_note` only on `VALIDATION_FAILED`/`failed`. `cancel --wait` ends the run as `cancelled` and preserves the worktree.
 
 The supervisor creates an isolated worktree from L1 when present, otherwise L0; retains full diffs; runs the plan's validation commands independently; and writes `builder-review.patch/json` plus `validation/` records. Do not read Builder's prose summary or treat it as evidence. Builder environments strip foreign credentials and model overrides while preserving Desktop OAuth; executable SHA256 and ACP `currentValue` model evidence are rechecked before execute/approve — this detects changes during the run, not vendor authenticity.
 
@@ -109,9 +109,9 @@ Enter after the persistent run reaches `READY_FOR_REVIEW` or when the prompt beg
 
 Review for requirement coverage and behavioral correctness; root-cause alignment; error paths, concurrency, security, compatibility; test quality and gaps between claimed and observed validation; and unrelated changes. Report findings by severity with paths and lines; if none, say so and list residual risks. Usage and cost records are observability only; a progress file is context, never approval evidence. An `escalated`/`blocked` return is reviewed the same way: decide explicitly if it is genuinely Navigator's and resume the same session with a `BUILDER_RESUME` delta carrying the decision.
 
-## Per-run savings report
+## Per-run savings report (optional)
 
-On every terminal status the supervisor writes `savings.json`/`savings.md` and appends to `~/.prewalk/savings-history.jsonl`: an estimate of cost saved versus the Navigator doing all the work, priced from a user-maintained `prices.json` (see README). On Kimi the Navigator session is discovered from its wire records automatically; on other hosts run `record-usage` (tokens, or `--model` for just the model) before approving. Missing prices or an unknown Navigator model produce token counts and `unpriced` — never a fabricated percentage; Builder-only figures are an upper bound, and the report states its assumptions.
+Savings reporting is **off by default** — do not call `record-usage` or show a savings summary unless the user opts in (`prewalk_plan.py create --savings`, `PREWALK_SAVINGS=1`, `prewalk.py setup --savings`, or explicit `prewalk_builder.py report --run-dir <run-dir>`). When offering or enabling savings display, remind the user that **enabling it adds a small Navigator token cost** (extra stdout fields, a `record-usage` call on non-Kimi hosts, and reply output). When enabled, the supervisor writes `savings.json`/`savings.md` on terminal status and appends to `~/.prewalk/savings-history.jsonl`, priced from a user-maintained `prices.json` (see README). Missing prices or an unknown Navigator model produce token counts and `unpriced` — never a fabricated percentage; Builder-only figures are an upper bound, and the report states its assumptions.
 
 ## Guardrails
 

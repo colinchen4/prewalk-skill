@@ -83,7 +83,7 @@ class PersistentBuilderTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail(f"status {target} not reached: {prewalk_builder.status(self.run)}")
 
-    def make_plan(self, mode="brief_only", validation=None):
+    def make_plan(self, mode="brief_only", validation=None, savings=None):
         expected = "base\nhello from builder\n" if mode == "brief_only" else "first edit by navigator\nhello from builder\n"
         command = validation or (
             f'"{sys.executable}" -c "from pathlib import Path; '
@@ -91,7 +91,7 @@ class PersistentBuilderTests(unittest.TestCase):
         )
         plan = prewalk_plan.create_plan("h1", mode, "Append hello from builder to hello.txt",
                                         ["exact file content"], ["hello.txt"], cwd=str(self.repo),
-                                        validation=[command])
+                                        validation=[command], savings=savings)
         return prewalk_plan.write_plan(self.run, plan)
 
     def execute_and_wait_ready(self):
@@ -389,8 +389,19 @@ class PersistentBuilderTests(unittest.TestCase):
         self.assertEqual(nav["models"], ["nav/m"])
         self.assertEqual(nav["call_count"], 2)
 
-    def test_approved_run_writes_savings_report(self):
+    def test_approved_run_skips_savings_by_default(self):
         self.make_plan()
+        prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
+        self.execute_and_wait_ready()
+        prewalk_builder.queue(self.run, "approve")
+        self.wait_status("approved")
+        self.assertFalse((self.run / "savings.json").exists())
+        self.assertFalse((self.run / "savings.md").exists())
+        summary = prewalk_builder.summary(self.run)
+        self.assertNotIn("savings", summary)
+
+    def test_approved_run_writes_savings_report_when_opted_in(self):
+        self.make_plan(savings=True)
         prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
         self.execute_and_wait_ready()
         prewalk_builder.queue(self.run, "approve")
@@ -409,7 +420,7 @@ class PersistentBuilderTests(unittest.TestCase):
         prices = self.root / "prices.json"
         prices.write_text("{corrupt", encoding="utf-8")
         os.environ["PREWALK_PRICES_PATH"] = str(prices)
-        self.make_plan()
+        self.make_plan(savings=True)
         prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
         self.execute_and_wait_ready()
         prewalk_builder.queue(self.run, "approve")
@@ -501,8 +512,8 @@ class PersistentBuilderTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             prewalk_builder.record_usage(self.run, "navigator")
 
-    def test_approve_wait_returns_summary_with_savings(self):
-        self.make_plan()
+    def test_approve_wait_returns_summary_with_savings_when_enabled(self):
+        self.make_plan(savings=True)
         prewalk_builder.launch(self.run, self.run / "plan.json", "mock")
         result = self.cli("execute", "--run-dir", str(self.run), "--text", "go",
                           "--wait", "--timeout", "60")

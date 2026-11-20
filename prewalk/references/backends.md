@@ -7,6 +7,7 @@ The Builder is a second CLI process on a **weak model**. `scripts/builder_backen
 | `claude-code-sub` | A, Claude Pro/Max login | `claude -p --model sonnet` (`haiku`) | `--effort`, default `medium` | fixture-tested |
 | `codex-sub` | A, ChatGPT login | `codex exec -m gpt-6-luna` (`gpt-6.1-terra`) | `-c model_reasoning_effort=…`, default `high` | fixture-tested; effort key unverified |
 | `kimi-sub` | A, Kimi membership | `kimi acp` / `kimi -m kimi-code/kimi-for-coding` (`kimi-code/k3-256k`) | ACP `low/high/max`, default `low` | persistent ACP and OAuth live-verified |
+| `devin-sub` | A, Devin account | `devin acp` — `swe-2-high` (`swe-2-flash-medium`) | ACP `thought_level` `medium/high/max`, default `medium` | persistent ACP and OAuth live-verified |
 | `opencode-api` | B, external API | opencode + DeepSeek | – | stub |
 | `pi-api` | B, external API | pi + DeepSeek | – | stub |
 | `codex-deepseek` (`codex:deepseek`) | legacy | Codex Desktop + DeepSeek manager | low/medium/high | optional, explicit only |
@@ -18,6 +19,7 @@ Track A uses the user's own logged-in official CLI and never an API key: each ba
 - Claude: `best`, `fable`, `opus*`, `opusplan`, `default` (Navigator-class or usage-credit models).
 - Codex: Sol and Astra (about 1/20 of Luna's quota).
 - Kimi: `kimi-for-coding-highspeed` (3x quota).
+- Devin: `opus`, `fable`, `sol`, `astra`, `neon`, `argon`, `carbon`, `hydrogen`, `fusion`, `adaptive`, `lightning`, `pro`, `ultra` (Navigator-class / high-cost models).
 
 ## Model discovery and optional diagnostics
 
